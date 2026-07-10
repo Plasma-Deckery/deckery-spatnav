@@ -28,58 +28,71 @@ from vendor.orca_ax.ax_object import AXObject
 from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
 
 
+def is_relevant_element(node):
+    """Returns True if node should be included in the spatial-nav overlay.
+
+    Checks FOCUSABLE+SHOWING+ENABLED, with a role-based fallback for QML/
+    Kirigami list rows — see walk_elements() docstring for the full rationale.
+    Used both by the initial walk and by incremental event handlers so the
+    eligibility logic lives in exactly one place."""
+    if AXObject.is_dead(node):
+        return False
+    state_set = AXObject.get_state_set(node)
+    is_showing = AXUtilitiesState.is_showing(node, state_set)
+    is_enabled = AXUtilitiesState.is_enabled(node, state_set)
+    if not (is_showing and is_enabled):
+        return False
+    if AXUtilitiesState.is_focusable(node, state_set):
+        return True
+    # QML/Kirigami list rows (e.g. systemsettings category sidebar) are never
+    # individually FOCUSABLE — only their parent list container gets that state.
+    # The rows are navigated via arrow keys inside the list, not by per-row OS
+    # keyboard focus. Accept list item / table cell / tree item roles that are
+    # showing+enabled as a fallback so we draw one box per selectable row
+    # rather than one big box around the entire list (deckery#28).
+    role_name = AXObject.get_role_name(node) or ""
+    return role_name in ("list item", "table cell", "tree item")
+
+
+def walk_elements(node, max_depth=25, _depth=0, results=None):
+    """Walks the AT-SPI tree under node and returns a list of
+    Atspi.Accessible objects that pass is_relevant_element().
+
+    Orca-style: stores the actual accessible objects rather than
+    pre-extracting (role, name, extents) tuples. Callers obtain attributes
+    on demand via AXObject / AXComponent — those calls are served from
+    Orca's AXCacheManager after the first walk, so subsequent renders and
+    incremental updates are cheap.
+
+    Note on CoordType: AXComponent.get_rect() hardcodes CoordType.WINDOW
+    because on this system (KDE/Qt AT-SPI bridge, Scale 1.1 + software-
+    rotated panel) CoordType.SCREEN silently returns the same window-
+    relative numbers anyway. The real screen offset is added back at render
+    time from the KWin tracker's clientGeometry (deckery#28)."""
+    if results is None:
+        results = []
+    if _depth > max_depth:
+        return results
+    if is_relevant_element(node):
+        results.append(node)
+    for child in AXObject.iter_children(node):
+        walk_elements(child, max_depth, _depth + 1, results)
+    return results
+
+
 def walk(node, depth=0, max_depth=25, results=None):
+    """Legacy tuple-returning walk, kept for the standalone main() below.
+    New code should use walk_elements() instead."""
     if results is None:
         results = []
     if depth > max_depth:
         return results
-
-    state_set = AXObject.get_state_set(node)
-    is_focusable = AXUtilitiesState.is_focusable(node, state_set)
-    is_showing = AXUtilitiesState.is_showing(node, state_set)
-    is_enabled = AXUtilitiesState.is_enabled(node, state_set)
-
-    # QML/Kirigami list rows (e.g. the systemsettings category sidebar) are
-    # never individually FOCUSABLE — only their parent "list" container gets
-    # that state. The rows themselves are navigated via an internal
-    # "current item" highlight driven by arrow keys inside the list, not by
-    # per-row OS keyboard focus. Confirmed via direct AT-SPI inspection
-    # (deckery#28): systemsettings' 29-item sidebar list has FOCUSABLE only
-    # on the "list" node; its "list item" children are
-    # SHOWING+ENABLED+Action-capable but FOCUSABLE=False. Without this
-    # role-based fallback, the overlay would draw a single box around the
-    # entire list instead of one box per selectable category — so we also
-    # accept "list item"/"table cell"/"tree item" roles that are showing+
-    # enabled even without FOCUSABLE. This does NOT relax the check for
-    # "heading"/other non-interactive roles, which stay FOCUSABLE-gated.
-    role_name = AXObject.get_role_name(node) or ""
-    is_implicit_row = role_name in ("list item", "table cell", "tree item")
-
-    if (is_focusable or is_implicit_row) and is_showing and is_enabled:
-        # Deliberately WINDOW, not SCREEN: on this system (KDE/Qt AT-SPI
-        # bridge, display with Scale 1.1 + Rotation 8 software-rotated
-        # panel) CoordType.SCREEN does NOT apply the compositor's
-        # rotation/scale transform and returns the same numbers as
-        # WINDOW — i.e. it's silently window-client-relative, not
-        # screen-absolute. Confirmed by comparing a window's own AT-SPI
-        # frame extents against KWin's real clientGeometry for it (sizes
-        # matched, only the absolute offset was missing). AXComponent.get_rect()
-        # already hardcodes CoordType.WINDOW for this exact reason (see
-        # vendor/orca_ax/ax_component.py); the caller
-        # (prototype_atspi_overlay.py) adds the real screen offset back in
-        # using the KWin window-tracker's clientGeometry for the matching
-        # window (deckery#28).
+    if is_relevant_element(node):
         rect = AXComponent.get_rect(node)
         extents = rect if rect.width or rect.height or rect.x or rect.y else None
-
-        name = AXObject.get_name(node) or ""
-        role = role_name
-
-        results.append((depth, role, name, extents))
-
+        results.append((depth, AXObject.get_role_name(node) or "", AXObject.get_name(node) or "", extents))
     for child in AXObject.iter_children(node):
         walk(child, depth + 1, max_depth, results)
-
     return results
 
 

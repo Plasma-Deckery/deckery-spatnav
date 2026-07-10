@@ -94,7 +94,8 @@ import cairo
 
 import deckery_draw as draw
 import deckery_walk as walk
-import deckery_events as events
+from deckery_cache import ElementCache, ATSPI_LOCK
+from deckery_events import EventRouter
 from deckery_a11y import enable_chromium_accessibility
 from deckery_tracker import WindowTracker
 
@@ -127,15 +128,14 @@ class OverlayWindow(Gtk.Window):
         self.tracker.start()
         enable_chromium_accessibility()
 
-        # The AT-SPI tree is now owned by TreeCache, not rebuilt here on a
-        # timer. build_full() is the same expensive (1-13+s) walk the old
-        # periodic _walk_worker used to redo every REFRESH_SECONDS — it now
-        # runs exactly once, off the main thread so it can't freeze the
-        # click-through redraw path, and TreeCache.start() (called once that
-        # initial walk lands) registers the AT-SPI event listener that keeps
-        # the tree current from then on (deckery_events.py).
-        self.tree_cache = events.TreeCache()
-        threading.Thread(target=self._build_initial_tree, daemon=True).start()
+        # ElementCache owns the set of relevant AT-SPI elements.
+        # build_initial() runs once on a background thread (full desktop walk
+        # to prime Orca's AXCacheManager). After that, EventRouter routes
+        # individual AT-SPI events directly to ElementCache's O(1)/O(subtree)
+        # handlers — no full app re-walk per event (deckery_cache.py).
+        self.element_cache = ElementCache()
+        self.event_router = EventRouter(self.element_cache)
+        threading.Thread(target=self._build_initial_cache, daemon=True).start()
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.set_draw_func(self._draw, None)
@@ -147,37 +147,27 @@ class OverlayWindow(Gtk.Window):
             Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
-    def _build_initial_tree(self):
-        # Background thread: the one-time expensive full-desktop walk (same
-        # cost the old periodic _walk_worker used to pay every
-        # REFRESH_SECONDS). Runs before any tracker/event data exists, so the
-        # first render (_apply_initial_tree, on the main thread) may still
-        # fall back to unfiltered/unoffset elements if the KWin tracker
-        # hasn't sent its first update yet — same degraded-but-visible
-        # behavior the old _initial_fallback_refresh timer provided.
-        self.tree_cache.build_full()
-        GLib.idle_add(self._apply_initial_tree)
+    def _build_initial_cache(self):
+        """Background thread: one-time full desktop walk to populate
+        ElementCache and prime Orca's AXCacheManager."""
+        with ATSPI_LOCK:
+            meta, elements = self.element_cache.build_initial()
+        GLib.idle_add(self._apply_initial_cache, meta, elements)
 
-    def _apply_initial_tree(self):
-        # Main thread: safe to register the AT-SPI event listener here (see
-        # TreeCache.start()'s docstring — must be called from the thread
-        # that owns the GLib main loop events dispatch through).
+    def _apply_initial_cache(self, meta, elements):
+        """Main thread: apply initial cache and start event listener."""
+        self.element_cache.apply_initial(meta, elements)
         self._tree_ready = True
-        self.tree_cache.start(on_change=self._render)
+        # EventRouter must be started on the main thread (AT-SPI event
+        # dispatch goes through the GLib main loop).
+        self.event_router.start(on_change=self._render)
         self._render()
         return False  # one-shot idle source
 
     def _render(self):
-        # Cheap, pure re-render: no AT-SPI calls (deckery_walk.render_tree()
-        # only applies our own KWin-visibility/offset filtering to whatever
-        # TreeCache.tree currently holds). Called both by the tracker's
-        # debounced update (desktop switch, window move) and by TreeCache's
-        # on_change callback (an AT-SPI event updated some app's subtree) —
-        # safe to call from either since both already run on the GTK main
-        # thread (WindowTracker's debounce timer / TreeCache's GLib.idle_add).
         if not self._tree_ready:
             return
-        result = walk.render_tree(self.tracker, self.tree_cache.tree)
+        result = walk.render_tree(self.tracker, self.element_cache)
         self.elements = result.elements
         self._skipped_windows = result.skipped_windows
         self.last_walk_ms = result.elapsed_ms
