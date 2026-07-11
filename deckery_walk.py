@@ -45,7 +45,9 @@ def render_tree(tracker, cache):
     skipped_windows = 0
     fallback_offsets = 0
 
-    for wm in cache.windows:
+    # Snapshot: D-Bus calls inside the loop spin the GLib event loop, which
+    # can deliver AT-SPI events that modify the cache dicts mid-iteration.
+    for wm in list(cache.windows):
         # AT-SPI frame-level visibility pre-filter (same logic as before,
         # using is_visible/is_showing captured at walk time in _WindowMeta
         # and updated by ElementCache.on_state_changed when they change).
@@ -83,7 +85,7 @@ def render_tree(tracker, cache):
         if is_fallback:
             fallback_offsets += 1
 
-        for element in cache.elements_for(hash(wm.window)):
+        for element in list(cache.elements_for(hash(wm.window))):
             if AXObject.is_dead(element):
                 continue
             rect = AXComponent.get_rect(element)  # Orca cache hit

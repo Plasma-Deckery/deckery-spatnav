@@ -49,6 +49,7 @@ class EventRouter:
         self._spam_filter = EventSpamFilter()
         self._listener = None
         self._on_change = None
+        self._render_pending = False  # debounce: at most one queued render
 
     def start(self, on_change):
         """Register listeners. Must be called from the GTK main thread."""
@@ -84,15 +85,29 @@ class EventRouter:
             self._cache.on_window_destroy(event)
         elif t == "window:deactivate":
             pass  # window still exists, nothing to do in the cache
-        elif t == "object:children-changed:add":
+        elif t.startswith("object:children-changed:add"):
             self._cache.on_children_changed_add(event)
-        elif t == "object:children-changed:remove":
+        elif t.startswith("object:children-changed:remove"):
             self._cache.on_children_changed_remove(event)
         elif t in ("object:state-changed:showing", "object:state-changed:enabled"):
             self._cache.on_state_changed(event)
 
+        self._schedule_change()
+
+    def _schedule_change(self):
+        """Coalesce rapid AT-SPI events into a single render via idle_add.
+        Without this, Firefox building its tree fires thousands of events
+        and each one triggers a full render, blocking the GTK main loop."""
+        if self._render_pending or self._on_change is None:
+            return
+        self._render_pending = True
+        GLib.idle_add(self._fire_change)
+
+    def _fire_change(self):
+        self._render_pending = False
         if self._on_change is not None:
             self._on_change()
+        return False
 
     def _periodic_rebuild(self):
         """Safety-net: trigger a full rebuild in case events were missed."""

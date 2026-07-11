@@ -330,16 +330,26 @@ class ElementCache:
         if window is None:
             return
         h = hash(window)
-        if h not in self._elements:
+
+        # If this is a window frame that isn't tracked yet, walk it now.
+        # Handles popups that appear via state-changed:showing rather than
+        # window:create (e.g. some KDE plasmashell popups). Must be checked
+        # BEFORE the "h not in self._elements" guard below.
+        if obj == window and h not in self._meta:
+            self.on_window_create(type("_E", (), {"source": window})())
             return
+
+        if h not in self._elements:
+            return  # window not tracked (different desktop, etc.)
 
         # If this is a window frame itself, update the meta's is_visible/
         # is_showing (used by render_tree's pre-filter).
-        wm = self._meta.get(h)
-        if wm is not None and obj == window:
-            states = AXObject.get_state_set(window)
-            wm.is_visible = AXUtilitiesState.is_visible(window, states)
-            wm.is_showing = AXUtilitiesState.is_showing(window, states)
+        if obj == window:
+            wm = self._meta.get(h)
+            if wm is not None:
+                states = AXObject.get_state_set(window)
+                wm.is_visible = AXUtilitiesState.is_visible(window, states)
+                wm.is_showing = AXUtilitiesState.is_showing(window, states)
             return
 
         now_relevant = scan.is_relevant_element(obj)

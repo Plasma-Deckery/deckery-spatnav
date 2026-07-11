@@ -40,6 +40,14 @@ def is_relevant_element(node):
     state_set = AXObject.get_state_set(node)
     is_showing = AXUtilitiesState.is_showing(node, state_set)
     is_enabled = AXUtilitiesState.is_enabled(node, state_set)
+    role_name = AXObject.get_role_name(node) or ""
+    # Firefox menu bar items (File, Edit, View) have role "menu" and report
+    # is_showing=False even when the bar is visible — include them when they
+    # have a name. Unnamed "menu" nodes are hidden dropdown/context menus
+    # pre-built by Firefox; those become showing=True when actually opened
+    # and are caught by on_state_changed() at that point.
+    if role_name == "menu" and (AXObject.get_name(node) or ""):
+        return is_enabled
     if not (is_showing and is_enabled):
         return False
     if AXUtilitiesState.is_focusable(node, state_set):
@@ -50,7 +58,6 @@ def is_relevant_element(node):
     # keyboard focus. Accept list item / table cell / tree item roles that are
     # showing+enabled as a fallback so we draw one box per selectable row
     # rather than one big box around the entire list (deckery#28).
-    role_name = AXObject.get_role_name(node) or ""
     return role_name in ("list item", "table cell", "tree item")
 
 

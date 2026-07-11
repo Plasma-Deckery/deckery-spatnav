@@ -140,6 +140,9 @@ class OverlayWindow(Gtk.Window):
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.set_draw_func(self._draw, None)
         self.set_child(self.drawing_area)
+        # Draw the loading state immediately so it's visible during the
+        # 5-8 s build_initial() background walk.
+        GLib.idle_add(self.drawing_area.queue_draw)
 
         css = Gtk.CssProvider()
         css.load_from_data(b"window.overlay-transparent { background: transparent; }")
@@ -184,8 +187,10 @@ class OverlayWindow(Gtk.Window):
 
     def _draw(self, area, cr, width, height, data):
         draw.reset_click_through(self.get_surface())
+        if not self._tree_ready:
+            draw.draw_hud(cr, "deckery spatial-nav — building AT-SPI tree…")
+            return
         draw.draw_elements(cr, self.elements)
-
         tracker_status = (
             "tracker: live" if self.tracker.visible_pids is not None else "tracker: NO DATA (unfiltered)"
         )

@@ -74,15 +74,26 @@ _IGNORE_TEXT_INSERT_CHARS_TEXT_ROLE = 5000
 # constantly as a side effect of normal layout and isn't a real
 # appear/disappear worth a re-walk on its own -- see
 # event_manager.py:_ignore_state_changed_subtype.
+#
+# Window-level roles (FRAME, DIALOG, WINDOW, POPUP_MENU) are always
+# interesting: a popup/dialog appearing or disappearing is exactly what the
+# overlay needs to react to. Orca's original allowlist was speech-output
+# oriented and didn't include FRAME (Orca learns about windows via
+# window:create/destroy, not state-changed). Deckery adds them so that
+# popups whose AT-SPI window lifecycle events don't fire (e.g. KDE plasmashell
+# popups that use show/hide instead of create/destroy) still trigger a re-walk.
 _SHOWING_STATE_INTERESTING_ROLES = (
     Atspi.Role.ALERT,
     Atspi.Role.ANIMATION,
     Atspi.Role.DIALOG,
+    Atspi.Role.FRAME,
     Atspi.Role.INFO_BAR,
     Atspi.Role.MENU,
     Atspi.Role.NOTIFICATION,
+    Atspi.Role.POPUP_MENU,
     Atspi.Role.STATUS_BAR,
     Atspi.Role.TOOL_TIP,
+    Atspi.Role.WINDOW,
 )
 
 

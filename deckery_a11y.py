@@ -21,17 +21,16 @@ Chrome's own --force-renderer-accessibility flag but without needing to
 control how the target app is launched (we don't control how Claude Desktop
 starts).
 
-Deliberately setting IsEnabled, NOT ScreenReaderEnabled: on GNOME,
-ScreenReaderEnabled is mirrored by gsd-a11y-settings into actually
-auto-starting Orca as a side effect — a real screen reader we don't want
-running just to read extents. IsEnabled is the narrower "some AT is active"
-bit Mozilla/Chromium key their tree-building off of, without that side
-effect. (On this system's KDE Plasma session there's no gsd-a11y-settings to
-trigger anyway, but IsEnabled is the correct property regardless of desktop
-environment — see https://github.com/trycua/cua/issues/2010 for the
-equivalent problem in a similar computer-use-agent tool, and the Debian
-accessibility mailing list thread on the IsEnabled/ScreenReaderEnabled
-distinction.)
+Setting both IsEnabled AND ScreenReaderEnabled:
+- IsEnabled triggers Chromium/Electron (confirmed deckery#28).
+- ScreenReaderEnabled triggers Firefox/Gecko: Firefox's nsAccessibilityService
+  specifically watches for ScreenReaderEnabled=True to initialise its full
+  AT-SPI tree (tabs, toolbar, back/forward, address bar, page content). Without
+  it, only the top-level window frame is registered but zero children are
+  exposed — confirmed by AT-SPI inspection showing elements=1 for Firefox.
+- Risk on GNOME: ScreenReaderEnabled=True is mirrored by gsd-a11y-settings
+  into auto-starting Orca. On this system's KDE Plasma session there is no
+  gsd-a11y-settings, so this side-effect does not apply here.
 
 One-shot, fire-and-forget at startup: once Chromium sees IsEnabled=True it
 keeps building trees for the rest of the process lifetime, no need to repeat
@@ -44,20 +43,21 @@ from gi.repository import GLib, Gio
 def enable_chromium_accessibility():
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        bus.call_sync(
-            "org.a11y.Bus",
-            "/org/a11y/bus",
-            "org.freedesktop.DBus.Properties",
-            "Set",
-            GLib.Variant(
-                "(ssv)",
-                ("org.a11y.Status", "IsEnabled", GLib.Variant("b", True)),
-            ),
-            None,
-            Gio.DBusCallFlags.NONE,
-            -1,
-            None,
-        )
-        print("[a11y] set org.a11y.Status IsEnabled=True (enables Chromium/Electron AT-SPI trees)")
+        for prop, label in (
+            ("IsEnabled", "Chromium/Electron"),
+            ("ScreenReaderEnabled", "Firefox/Gecko"),
+        ):
+            bus.call_sync(
+                "org.a11y.Bus",
+                "/org/a11y/bus",
+                "org.freedesktop.DBus.Properties",
+                "Set",
+                GLib.Variant("(ssv)", ("org.a11y.Status", prop, GLib.Variant("b", True))),
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+        print("[a11y] set org.a11y.Status IsEnabled+ScreenReaderEnabled=True (enables Chromium/Electron + Firefox AT-SPI trees)")
     except Exception as e:
-        print(f"[a11y] failed to set org.a11y.Status IsEnabled: {e}")
+        print(f"[a11y] failed to set org.a11y.Status: {e}")
