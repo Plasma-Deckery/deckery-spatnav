@@ -7,15 +7,27 @@ re-walking an entire app on every AT-SPI event (O(n*m) D-Bus calls),
 we maintain a flat dict of which Atspi.Accessible objects are currently
 relevant (focusable+showing+enabled), keyed by their containing window.
 
-Caching: AXComponent.get_rect() and AXObject.get_state_set() go through
-libatspi's own D-Bus protocol cache (not Orca's higher-level AXCacheManager,
-which caches derived values like object attributes and dead-object status).
-After build_initial() primes libatspi's cache via the initial walk, render
-calls to AXComponent.get_rect(element) are served from that protocol cache
-without D-Bus round-trips. AXObject.clear_cache(obj) flushes libatspi's
-cache for one specific object via Atspi.Accessible.clear_cache_single() —
-the right scalpel for state-changed/children-changed invalidation instead of
-nuking everything.
+Caching: the module previously assumed AXComponent.get_rect() alone was a
+live D-Bus call while AXObject.get_name()/get_role_name()/get_state_set()
+were served from libatspi's own protocol cache after build_initial(). That
+assumption was wrong for all three — measured directly on this system
+(bench_render.py, deckery#28): get_rect() ~450-730 µs/call, get_name()
+~520 µs/call, get_role_name() ~615 µs/call, repeated calls on the SAME
+element, all consistent with a live D-Bus round-trip rather than a cache
+hit. Whatever caching libatspi's C library does for the "cache" D-Bus
+interface, it evidently doesn't shield the AXObject/AXComponent GI wrapper
+calls this code makes — so all three cost the same and get invalidated the
+same way. 154 elements at ~1.8ms/element (3 live calls) fully accounts for
+the measured ~286-650ms median per render.
+
+ElementCache.get_element_snapshot() below caches (rect, name, role)
+together per element, keyed by hash(element), eagerly invalidated by
+on_state_changed() (the same event that already triggers a targeted
+AXObject.clear_cache() for the OTHER libatspi-side cache) and bounded by
+_EXTENTS_TTL_S as a safety net for any change that doesn't correlate with
+an AT-SPI event we listen for. AXObject.clear_cache(obj) still flushes
+libatspi's own cache for one specific object via
+Atspi.Accessible.clear_cache_single() — whatever that cache does cover.
 
 On event (from deckery_events.py):
   children-changed:add    → invalidate parent's libatspi cache, walk the
@@ -40,6 +52,7 @@ Orca code used directly:
 """
 
 import threading
+import time
 
 import gi
 
@@ -51,6 +64,18 @@ import prototype_atspi_scan as scan
 from vendor.orca_ax.ax_component import AXComponent
 from vendor.orca_ax.ax_object import AXObject
 from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
+
+# Extents cache TTL — see get_extents() below. Measured (bench_render.py,
+# deckery#28): a full render_tree() pass over ~150 elements takes ~300-400ms
+# of live get_rect() calls when cold, so a TTL shorter than that would
+# expire before a second, closely-spaced render could ever reuse the first
+# one's fetches — defeats the cache for exactly the case it targets (a burst
+# of renders triggered close together by unrelated events). 500ms comfortably
+# covers a render pass while staying two orders of magnitude below the 60s
+# full-cache-rebuild safety net (deckery_events.py's FULL_REBUILD_SECONDS),
+# which is the actual backstop for a position change that never fires any
+# AT-SPI event this cache invalidates on.
+_EXTENTS_TTL_S = 0.5
 
 # Serializes all AT-SPI calls during build_initial() against each other.
 # Not needed after startup (event handlers run on the main thread, which is
@@ -102,16 +127,19 @@ def _extract_window_meta(window, app_name, is_chromium):
 
 def _find_window_ancestor(obj):
     """Walk up the AT-SPI parent chain to find the enclosing window.
-    Returns None if no window ancestor is found (e.g. desktop-level object)."""
-    current = obj
-    for _ in range(50):  # cap: avoid infinite loops on malformed trees
-        if current is None or AXObject.is_dead(current):
-            return None
-        role = AXObject.get_role(current)
-        if role in _WINDOW_ROLES:
-            return current
-        current = AXObject.get_parent(current)
-    return None
+    Returns None if no window ancestor is found (e.g. desktop-level object).
+    ATSPI_LOCK is reentrant (RLock), so this is safe to call whether or not
+    the caller already holds it."""
+    with ATSPI_LOCK:
+        current = obj
+        for _ in range(50):  # cap: avoid infinite loops on malformed trees
+            if current is None or AXObject.is_dead(current):
+                return None
+            role = AXObject.get_role(current)
+            if role in _WINDOW_ROLES:
+                return current
+            current = AXObject.get_parent(current)
+        return None
 
 
 class ElementCache:
@@ -127,6 +155,32 @@ class ElementCache:
         self._meta = {}
         # {hash(window): list[Atspi.Accessible]} — relevant elements per window
         self._elements = {}
+        # {hash(element): (Atspi.Rect, name, role, monotonic_timestamp)} —
+        # see get_element_snapshot()
+        self._element_data = {}
+        # hash(window) of the last window:activate seen, or None. Used by
+        # EventRouter's active-window poll (deckery#28) to force-refresh
+        # just the focused window's elements on a short timer — see
+        # invalidate_window_extents() below for why events alone aren't
+        # enough for this.
+        self._active_window_hash = None
+        # Guards _meta/_elements/_element_data/_active_window_hash against
+        # concurrent access (deckery#28): the deckery_backend.py/main.py
+        # architecture runs AT-SPI event handling and render_tree() on
+        # genuinely different OS threads (confirmed live — event callbacks
+        # were observed firing on at least 3 distinct thread ids: the GTK
+        # main thread, the dedicated worker thread, and periodic-rebuild's
+        # own spawned thread). Before this lock, an event handler mutating
+        # self._elements[h] (e.g. .append()/.pop()) while render_tree() was
+        # mid-iteration over the same dict/list from another thread was a
+        # real, reproduced bug: elements silently disappearing again after
+        # a while, the list no longer updating. Public as .lock so
+        # deckery_walk.render_tree() can hold it for an entire render pass,
+        # not just per individual accessor call — RLock so nested
+        # acquisition by the same thread (e.g. on_children_changed_add()
+        # calling on_window_create() calling back into a locked method)
+        # doesn't deadlock.
+        self.lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Initial population (background thread)
@@ -155,9 +209,16 @@ class ElementCache:
         return meta, elements
 
     def apply_initial(self, meta, elements):
-        """Apply the result of build_initial() — must be called on main thread."""
-        self._meta = meta
-        self._elements = elements
+        """Apply the result of build_initial(). Called after the initial
+        walk and after each periodic safety rebuild — see EventRouter."""
+        with self.lock:
+            self._meta = meta
+            self._elements = elements
+            # Fresh element set (initial build or the 60s safety rebuild)
+            # means every cached entry's key may now reference a
+            # stale/replaced object — drop them all rather than risk a hash
+            # collision serving a wrong-object's cached data.
+            self._element_data = {}
 
     def _walk_app_locked(self, app, meta, elements):
         """Walk one app's windows. Caller holds ATSPI_LOCK."""
@@ -198,24 +259,26 @@ class ElementCache:
     def on_window_create(self, event):
         """window:create — walk just the new window and add it to the cache."""
         window = event.source
-        if window is None or AXObject.is_dead(window):
-            return
-        try:
-            app = Atspi.Accessible.get_application(window)
-        except Exception:
-            app = None
-        if app is None:
-            return
-        is_chromium = filt.is_chromium_toolkit(AXObject.get_toolkit_name(app))
-        app_name = AXObject.get_name(app) or ""
-        try:
-            wm = _extract_window_meta(window, app_name, is_chromium)
-            elems = scan.walk_elements(window)
-        except Exception:
-            return
+        with ATSPI_LOCK:
+            if window is None or AXObject.is_dead(window):
+                return
+            try:
+                app = Atspi.Accessible.get_application(window)
+            except Exception:
+                app = None
+            if app is None:
+                return
+            is_chromium = filt.is_chromium_toolkit(AXObject.get_toolkit_name(app))
+            app_name = AXObject.get_name(app) or ""
+            try:
+                wm = _extract_window_meta(window, app_name, is_chromium)
+                elems = scan.walk_elements(window)
+            except Exception:
+                return
         h = hash(window)
-        self._meta[h] = wm
-        self._elements[h] = elems
+        with self.lock:
+            self._meta[h] = wm
+            self._elements[h] = elems
         print(f"[cache] window:create — tracked {h}, {len(elems)} elements")
 
     def on_window_activate(self, event):
@@ -224,27 +287,32 @@ class ElementCache:
         Returns True if the window was newly added, False if already tracked
         (caller uses this to suppress an unnecessary render)."""
         window = event.source
-        if window is None or AXObject.is_dead(window):
-            return False
-        h = hash(window)
-        if h in self._meta:
-            return False  # already tracked, nothing to do
-        # Not yet in cache — treat like a window:create.
-        try:
-            app = Atspi.Accessible.get_application(window)
-        except Exception:
-            app = None
-        if app is None:
-            return False
-        is_chromium = filt.is_chromium_toolkit(AXObject.get_toolkit_name(app))
-        app_name = AXObject.get_name(app) or ""
-        try:
-            wm = _extract_window_meta(window, app_name, is_chromium)
-            elems = scan.walk_elements(window)
-        except Exception:
-            return False
-        self._meta[h] = wm
-        self._elements[h] = elems
+        with ATSPI_LOCK:
+            if window is None or AXObject.is_dead(window):
+                return False
+            h = hash(window)
+            with self.lock:
+                self._active_window_hash = h
+                already_tracked = h in self._meta
+            if already_tracked:
+                return False  # already tracked, nothing to do
+            # Not yet in cache — treat like a window:create.
+            try:
+                app = Atspi.Accessible.get_application(window)
+            except Exception:
+                app = None
+            if app is None:
+                return False
+            is_chromium = filt.is_chromium_toolkit(AXObject.get_toolkit_name(app))
+            app_name = AXObject.get_name(app) or ""
+            try:
+                wm = _extract_window_meta(window, app_name, is_chromium)
+                elems = scan.walk_elements(window)
+            except Exception:
+                return False
+        with self.lock:
+            self._meta[h] = wm
+            self._elements[h] = elems
         print(f"[cache] window:activate — newly tracked {h}, {len(elems)} elements")
         return True
 
@@ -252,9 +320,12 @@ class ElementCache:
         """window:destroy — drop the window entry."""
         window = event.source
         h = hash(window)
-        dropped = h in self._meta
-        self._meta.pop(h, None)
-        self._elements.pop(h, None)
+        with self.lock:
+            dropped = h in self._meta
+            self._meta.pop(h, None)
+            self._elements.pop(h, None)
+            if self._active_window_hash == h:
+                self._active_window_hash = None
         if dropped:
             print(f"[cache] window:destroy — dropped {h}")
 
@@ -263,30 +334,49 @@ class ElementCache:
         elements to the containing window's list. event.any_data is the direct
         new child of event.source; it may itself have focusable descendants."""
         child = event.any_data
-        if child is None or AXObject.is_dead(child):
-            return
+        with ATSPI_LOCK:
+            if child is None or AXObject.is_dead(child):
+                return
 
-        # If the added child is itself a window-level object (e.g. a new
-        # plasmashell popup appearing), treat it as a window:create.
-        role = AXObject.get_role(child)
-        if role in _WINDOW_ROLES:
-            self.on_window_create(type("_E", (), {"source": child})())
-            return
+            # If the added child is itself a window-level object (e.g. a new
+            # plasmashell popup appearing), treat it as a window:create.
+            role = AXObject.get_role(child)
+            if role in _WINDOW_ROLES:
+                self.on_window_create(type("_E", (), {"source": child})())
+                return
 
-        window = _find_window_ancestor(event.source)
-        if window is None:
-            return
-        h = hash(window)
-        if h not in self._elements:
-            return  # window not tracked (different desktop etc.)
+            window = _find_window_ancestor(event.source)
+            if window is None:
+                return
+            h = hash(window)
+            with self.lock:
+                if h not in self._elements:
+                    return  # window not tracked (different desktop etc.)
 
-        # Invalidate parent's libatspi cache so the added child becomes
-        # visible to subsequent get_child_count/get_child_at_index calls.
-        AXObject.clear_cache(event.source)
-        new_elems = scan.walk_elements(child)
+            # Invalidate parent's libatspi cache so the added child becomes
+            # visible to subsequent get_child_count/get_child_at_index calls.
+            AXObject.clear_cache(event.source)
+            new_elems = scan.walk_elements(child)
         if new_elems:
-            self._elements[h].extend(new_elems)
-            print(f"[cache] children-changed:add — +{len(new_elems)} elements in window {h}")
+            with self.lock:
+                if h not in self._elements:
+                    return  # window got dropped while we were walking
+                # Dedup by identity before extending: confirmed live
+                # (deckery#28, user report of duplicated boxes after
+                # switching desktops away and back) that the same object can
+                # reach this method twice — e.g. both a plain
+                # "children-changed:add" and its ":system"-suffixed variant
+                # routing to the same handler for what's semantically one
+                # underlying change (deckery_events.py routes both via
+                # startswith()), or an overlapping subtree walk from two
+                # separate add events. Extending unconditionally duplicated
+                # the object in self._elements[h], drawing the same box
+                # twice.
+                existing = self._elements[h]
+                added = [e for e in new_elems if e not in existing]
+                if added:
+                    existing.extend(added)
+                    print(f"[cache] children-changed:add — +{len(added)} elements in window {h}")
 
     def on_children_changed_remove(self, event):
         """children-changed:remove — remove the specific element (and any of
@@ -295,22 +385,26 @@ class ElementCache:
         if child is None:
             return
 
-        # Window-level removal — treat as window:destroy.
-        if not AXObject.is_dead(child):
-            role = AXObject.get_role(child)
-            if role in _WINDOW_ROLES:
-                self.on_window_destroy(type("_E", (), {"source": child})())
-                return
+        with ATSPI_LOCK:
+            # Window-level removal — treat as window:destroy.
+            if not AXObject.is_dead(child):
+                role = AXObject.get_role(child)
+                if role in _WINDOW_ROLES:
+                    self.on_window_destroy(type("_E", (), {"source": child})())
+                    return
 
         # Remove the element (and any sub-elements that are the same object
         # or children of it) from whichever window list contains them.
         removed = 0
-        for h, elems in self._elements.items():
-            before = len(elems)
-            # Identity comparison — Atspi.Accessible objects are stable for
-            # the lifetime of the remote object (same as Orca's hash(obj) key).
-            self._elements[h] = [e for e in elems if e != child]
-            removed += before - len(self._elements[h])
+        with self.lock:
+            for h, elems in list(self._elements.items()):
+                before = len(elems)
+                # Identity comparison — Atspi.Accessible objects are stable
+                # for the lifetime of the remote object (same as Orca's
+                # hash(obj) key).
+                self._elements[h] = [e for e in elems if e != child]
+                removed += before - len(self._elements[h])
+            self._element_data.pop(hash(child), None)
         if removed:
             print(f"[cache] children-changed:remove — -{removed} elements")
 
@@ -319,45 +413,59 @@ class ElementCache:
         specific object's eligibility and add or remove it accordingly.
         O(1): only touches this one object, not the whole window."""
         obj = event.source
-        if obj is None or AXObject.is_dead(obj):
-            return
+        with ATSPI_LOCK:
+            if obj is None or AXObject.is_dead(obj):
+                return
 
-        # Invalidate this object's libatspi protocol cache entry so the next
-        # get_state_set() call re-fetches from AT-SPI (targeted, not global).
-        AXObject.clear_cache(obj)
+            # Invalidate this object's libatspi protocol cache entry so the
+            # next get_state_set() call re-fetches from AT-SPI (targeted,
+            # not global).
+            AXObject.clear_cache(obj)
 
-        window = _find_window_ancestor(obj)
-        if window is None:
-            return
-        h = hash(window)
+            window = _find_window_ancestor(obj)
+            if window is None:
+                return
+            h = hash(window)
 
-        # If this is a window frame that isn't tracked yet, walk it now.
-        # Handles popups that appear via state-changed:showing rather than
-        # window:create (e.g. some KDE plasmashell popups). Must be checked
-        # BEFORE the "h not in self._elements" guard below.
-        if obj == window and h not in self._meta:
-            self.on_window_create(type("_E", (), {"source": window})())
-            return
+            # If this is a window frame that isn't tracked yet, walk it now.
+            # Handles popups that appear via state-changed:showing rather
+            # than window:create (e.g. some KDE plasmashell popups). Must be
+            # checked BEFORE the "h not in self._elements" guard below.
+            with self.lock:
+                frame_untracked = obj == window and h not in self._meta
+            if frame_untracked:
+                self.on_window_create(type("_E", (), {"source": window})())
+                return
 
-        if h not in self._elements:
-            return  # window not tracked (different desktop, etc.)
+            # now_relevant/states: still under ATSPI_LOCK (may hit D-Bus);
+            # self.lock (below) is only for the dict mutation itself.
+            now_relevant = scan.is_relevant_element(obj) if obj != window else None
+            states = AXObject.get_state_set(window) if obj == window else None
 
-        # If this is a window frame itself, update the meta's is_visible/
-        # is_showing (used by render_tree's pre-filter).
-        if obj == window:
-            wm = self._meta.get(h)
-            if wm is not None:
-                states = AXObject.get_state_set(window)
-                wm.is_visible = AXUtilitiesState.is_visible(window, states)
-                wm.is_showing = AXUtilitiesState.is_showing(window, states)
-            return
+        with self.lock:
+            if h not in self._elements:
+                return  # window not tracked (different desktop, etc.)
 
-        now_relevant = scan.is_relevant_element(obj)
-        was_in = obj in self._elements[h]
-        if now_relevant and not was_in:
-            self._elements[h].append(obj)
-        elif not now_relevant and was_in:
-            self._elements[h].remove(obj)
+            # If this is a window frame itself, update the meta's is_visible/
+            # is_showing (used by render_tree's pre-filter).
+            if obj == window:
+                wm = self._meta.get(h)
+                if wm is not None and states is not None:
+                    wm.is_visible = AXUtilitiesState.is_visible(window, states)
+                    wm.is_showing = AXUtilitiesState.is_showing(window, states)
+                return
+
+            was_in = obj in self._elements[h]
+            if now_relevant and not was_in:
+                self._elements[h].append(obj)
+            elif not now_relevant and was_in:
+                self._elements[h].remove(obj)
+
+            # A showing/enabled transition usually means this element's
+            # position (and possibly name/role, e.g. a lazily-populated row)
+            # just became meaningful — never serve cached data from before
+            # the state flip.
+            self._element_data.pop(hash(obj), None)
 
     # ------------------------------------------------------------------
     # Read interface for render_tree()
@@ -365,9 +473,93 @@ class ElementCache:
 
     @property
     def windows(self):
-        """Iterable of _WindowMeta for all tracked windows."""
-        return self._meta.values()
+        """Snapshot list of _WindowMeta for all tracked windows. A list, not
+        the live dict view — deckery_walk.render_tree() should hold
+        cache.lock for its whole pass anyway, but this stays safe even
+        called standalone without the dict-changed-size-during-iteration
+        risk a bare .values() view would have under concurrent mutation."""
+        with self.lock:
+            return list(self._meta.values())
 
     def elements_for(self, window_hash):
         """List of Atspi.Accessible for one window (by hash(window))."""
-        return self._elements.get(window_hash, [])
+        with self.lock:
+            return list(self._elements.get(window_hash, []))
+
+    @property
+    def active_window_hash(self):
+        """hash(window) of the last window:activate seen, or None."""
+        with self.lock:
+            return self._active_window_hash
+
+    def invalidate_window_extents(self, window_hash):
+        """Drops cached (rect, name, role) for every element of one window,
+        forcing the next render to fetch fresh data instead of serving the
+        TTL-cached snapshot.
+
+        Exists for EventRouter's active-window poll (deckery#28): Qt/QML
+        content (confirmed via Qt's own atspiadaptor.cpp and
+        qquicklistview.cpp source — deckery session notes) never fires an
+        AT-SPI event for a plain position change (QQuickListView calls no
+        accessibility update at all when scrolling; Qt's Linux bridge drops
+        QAccessible::LocationChanged as a no-op even if something did).
+        Event-driven invalidation (on_state_changed, above) structurally
+        cannot catch that case — there is no event to invalidate on. A
+        periodic poll scoped to just the focused window's already-known
+        elements (not a full re-walk, not a full-desktop poll — both
+        measured too expensive, see deckery_events.py's FULL_REBUILD_SECONDS
+        comment and the desktop-wide vs. single-window element count
+        comparison in deckery#28 session notes) is the cheapest way to
+        bound how stale a silently-moved element's box can get."""
+        with self.lock:
+            for element in self._elements.get(window_hash, []):
+                self._element_data.pop(hash(element), None)
+
+    def get_element_snapshot(self, element):
+        """Cached (rect, name, role) lookup for element.
+
+        All three are live D-Bus round-trips in this environment (measured
+        ~450-730 µs/call each, see bench_render.py and the module docstring
+        above) — none of them are actually served from libatspi's protocol
+        cache the way earlier comments here assumed. Calling all three
+        unconditionally for every visible element on every render was the
+        dominant cost of render_tree() (up to ~650ms for 154 elements).
+
+        Cached together per element (one entry, one timestamp — they share
+        the same staleness lifecycle), eagerly invalidated by
+        on_state_changed() (a showing/enabled flip almost always means the
+        element's position/name/role is now stale or newly meaningful) and
+        bounded by _EXTENTS_TTL_S regardless — a safety net for any change
+        (e.g. some scrolled views) that doesn't correlate with any AT-SPI
+        event this cache listens on. Worst case, a moving element's box
+        lags by at most one TTL window; best case (the common one: a render
+        triggered by something other than this element changing — window
+        activation, an unrelated popup, a KWin tracker update after a
+        desktop switch) it's a dict lookup instead of three D-Bus calls."""
+        key = hash(element)
+        now = time.monotonic()
+        with self.lock:
+            cached = self._element_data.get(key)
+            if cached is not None and (now - cached[3]) < _EXTENTS_TTL_S:
+                return cached[0], cached[1], cached[2]
+        # Cache miss/expired — do the live D-Bus calls outside self.lock (our
+        # own dict lock) so a slow fetch on one thread doesn't stall every
+        # other thread's plain dict access. Still need ATSPI_LOCK around the
+        # calls themselves though: libatspi's shared connection is not safe
+        # for concurrent multi-threaded use (see ATSPI_LOCK's docstring) —
+        # confirmed live (deckery#28) with a libdbus
+        # "assertion watch != NULL failed" crash in dbus-watch.c when
+        # render_tree() (this path, on the worker thread) and an AT-SPI
+        # event handler (on the main thread) hit libatspi at the same time
+        # with no lock between them. A harmless race remains possible here:
+        # two threads missing on the same key at once both fetch (each under
+        # its own ATSPI_LOCK acquisition) and the second self.lock write
+        # wins — wastes one duplicate D-Bus call occasionally, never
+        # corrupts anything.
+        with ATSPI_LOCK:
+            rect = AXComponent.get_rect(element)
+            name = AXObject.get_name(element) or ""
+            role = AXObject.get_role_name(element) or ""
+        with self.lock:
+            self._element_data[key] = (rect, name, role, now)
+        return rect, name, role

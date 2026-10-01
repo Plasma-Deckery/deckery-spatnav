@@ -28,6 +28,38 @@ from vendor.orca_ax.ax_object import AXObject
 from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
 
 
+# Roles that are purely descriptive, never actionable — no click target, and
+# since this overlay isn't a screen reader there's no speech-output reason to
+# mark them either (deckery#28, user request: "da ich mit dem Label ja nicht
+# interagieren kann ... brauche ich auch keine Labels"). Checked unconditionally
+# in is_relevant_element(), ahead of the FOCUSABLE check, because a handful of
+# toolkits do mark static labels FOCUSABLE (e.g. for screen-reader tab order)
+# even though there's nothing to do with them here.
+_NEVER_RELEVANT_ROLES = frozenset(("label",))
+
+# Structural container roles that get suppressed when at least one of their
+# OWN descendants is independently relevant (deckery#28, user request): the
+# container's box would just be a redundant rectangle-around-rectangles once
+# its actionable content is already drawn as separate boxes — e.g. a
+# "page tab list" wrapping individually-clickable "page tab" entries, or a
+# "scroll pane" wrapping the actual scrollable content. Still drawn if it has
+# NO eligible descendant (e.g. an empty list) — the container itself may be
+# the only thing worth marking in that case. Deliberately excludes
+# window-level roles (FRAME, DIALOG, WINDOW) per user request — those stay
+# visible regardless of descendants.
+_SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES = frozenset((
+    "page tab list",
+    "scroll pane",
+    "panel",
+    "filler",
+    "section",
+    "list",
+    "table",
+    "tree",
+    "menu bar",
+))
+
+
 def is_relevant_element(node):
     """Returns True if node should be included in the spatial-nav overlay.
 
@@ -37,10 +69,12 @@ def is_relevant_element(node):
     eligibility logic lives in exactly one place."""
     if AXObject.is_dead(node):
         return False
+    role_name = AXObject.get_role_name(node) or ""
+    if role_name in _NEVER_RELEVANT_ROLES:
+        return False
     state_set = AXObject.get_state_set(node)
     is_showing = AXUtilitiesState.is_showing(node, state_set)
     is_enabled = AXUtilitiesState.is_enabled(node, state_set)
-    role_name = AXObject.get_role_name(node) or ""
     # Firefox menu bar items (File, Edit, View) have role "menu" and report
     # is_showing=False even when the bar is visible — include them when they
     # have a name. Unnamed "menu" nodes are hidden dropdown/context menus
@@ -63,7 +97,9 @@ def is_relevant_element(node):
 
 def walk_elements(node, max_depth=25, _depth=0, results=None):
     """Walks the AT-SPI tree under node and returns a list of
-    Atspi.Accessible objects that pass is_relevant_element().
+    Atspi.Accessible objects that pass is_relevant_element(), minus
+    structural containers subsumed by their own eligible descendants (see
+    _SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES above).
 
     Orca-style: stores the actual accessible objects rather than
     pre-extracting (role, name, extents) tuples. Callers obtain attributes
@@ -80,10 +116,22 @@ def walk_elements(node, max_depth=25, _depth=0, results=None):
         results = []
     if _depth > max_depth:
         return results
-    if is_relevant_element(node):
-        results.append(node)
+    # Post-order: recurse into children FIRST, so we know whether this node
+    # already has an independently-eligible descendant before deciding
+    # whether to add its own (possibly now-redundant) box.
+    before_count = len(results)
     for child in AXObject.iter_children(node):
         walk_elements(child, max_depth, _depth + 1, results)
+    has_eligible_descendant = len(results) > before_count
+
+    if is_relevant_element(node):
+        role_name = AXObject.get_role_name(node) or ""
+        suppress = (
+            has_eligible_descendant
+            and role_name in _SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES
+        )
+        if not suppress:
+            results.append(node)
     return results
 
 

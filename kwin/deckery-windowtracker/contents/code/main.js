@@ -85,6 +85,12 @@ function snapshotWindows() {
         // evaluate even if the property doesn't exist on some KWin builds —
         // !!undefined === false, so consumers get false (= not hidden) rather
         // than an error.
+        // stackingOrder is a per-window numeric z-position (higher = on top).
+        // Used by the overlay to skip drawing elements of windows that are
+        // fully occluded by a higher-stacked window (B3 occlusion fix).
+        var stackingOrder = -1;
+        try { stackingOrder = w.stackingOrder; } catch (e) {}
+
         out.push({
             pid: w.pid,
             caption: w.caption,
@@ -94,7 +100,8 @@ function snapshotWindows() {
             hidden: !!w.hidden,
             normalWindow: !!w.normalWindow,
             clientGeometry: clientGeo,
-            bufferGeometry: bufferGeo
+            bufferGeometry: bufferGeo,
+            stackingOrder: stackingOrder
         });
     }
     return out;
@@ -143,3 +150,29 @@ workspace.windowAdded.connect(hookWindow);
 // Initial push so a consumer that starts after this script don't have to
 // wait for the next window event.
 pushUpdate();
+
+// --- "Next window to last desktop" one-shot placement ---
+// Activated via kglobalaccel shortcut "deckery-next-on-last-desktop",
+// which is invoked by tools/next-on-last-desktop.sh.
+// Sets a flag that fires exactly once on the next normalWindow that opens,
+// moves it to the last virtual desktop, then resets.
+var sendNextToLast = false;
+
+registerShortcut(
+    "deckery-next-on-last-desktop",
+    "Deckery: Send Next Window to Last Desktop",
+    "",
+    function () {
+        sendNextToLast = true;
+    }
+);
+
+workspace.windowAdded.connect(function (w) {
+    if (!sendNextToLast || !w.normalWindow) return;
+    sendNextToLast = false;
+    var desktops = workspace.desktops;
+    if (desktops.length === 0) return;
+    var last = desktops[desktops.length - 1];
+    w.desktops = [last];
+    workspace.currentDesktop = last;
+});

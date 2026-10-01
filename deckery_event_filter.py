@@ -82,6 +82,16 @@ _IGNORE_TEXT_INSERT_CHARS_TEXT_ROLE = 5000
 # window:create/destroy, not state-changed). Deckery adds them so that
 # popups whose AT-SPI window lifecycle events don't fire (e.g. KDE plasmashell
 # popups that use show/hide instead of create/destroy) still trigger a re-walk.
+#
+# MENU_ITEM is deliberately included too, unlike Orca's original allowlist:
+# Orca only cares about the currently-focused item's speech announcement, so
+# a menu item's showing:False transition when its menu closes is irrelevant
+# noise for it. deckery draws a box for every relevant element regardless of
+# focus, so a dropped showing:False here means a closed Firefox History/
+# Bookmarks menu item's box never gets removed from ElementCache — confirmed
+# live (deckery#28): closing several submenus over a session left 100+ stale
+# "menu item" elements permanently in the relevant-elements list, visually
+# swamping real page content.
 _SHOWING_STATE_INTERESTING_ROLES = (
     Atspi.Role.ALERT,
     Atspi.Role.ANIMATION,
@@ -89,6 +99,9 @@ _SHOWING_STATE_INTERESTING_ROLES = (
     Atspi.Role.FRAME,
     Atspi.Role.INFO_BAR,
     Atspi.Role.MENU,
+    Atspi.Role.MENU_ITEM,
+    Atspi.Role.CHECK_MENU_ITEM,
+    Atspi.Role.RADIO_MENU_ITEM,
     Atspi.Role.NOTIFICATION,
     Atspi.Role.POPUP_MENU,
     Atspi.Role.STATUS_BAR,

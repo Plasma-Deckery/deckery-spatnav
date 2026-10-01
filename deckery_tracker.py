@@ -22,6 +22,7 @@ wires the on_update callback to trigger a debounced re-walk.
 """
 
 import json
+import os
 
 from gi.repository import GLib, Gio
 
@@ -36,6 +37,22 @@ TRACKER_INTERFACE_XML = """
   </interface>
 </node>
 """
+
+# One-off snippet (deckery#28) that does exactly what the persistent
+# deckery-windowtracker KWin script does on windowAdded/etc: pushes the
+# current window list once. Triggered via KWin's generic, documented
+# /Scripting D-Bus interface right after we own our own bus name, so a
+# freshly-started tracker gets real data immediately instead of waiting for
+# the NEXT natural KWin event (which could be seconds away or, if nothing
+# happens to change, never) — confirmed live this was the cause of the
+# overlay staying in unfiltered fallback mode for an entire session. Kept as
+# a separate ad-hoc snippet rather than modifying the persistent script:
+# KWin JS has no documented setInterval/Timer for "just poll periodically",
+# and the persistent script is what carries all desktop-filtering for the
+# whole session — safer to not touch it for this.
+_KWIN_PUSH_ONCE_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tools", "kwin_push_once.js"
+)
 
 # Debounce delay between a tracker Update() and triggering a re-walk. Short
 # enough that a desktop switch feels responsive, long enough to coalesce the
@@ -126,6 +143,36 @@ class WindowTracker:
             None,
         )
         print(f"[tracker] registered {TRACKER_OBJECT_PATH} on {name}, waiting for KWin updates...")
+        self._request_initial_push(connection)
+
+    def _request_initial_push(self, connection):
+        """One-shot: ask KWin to run _KWIN_PUSH_ONCE_SCRIPT via its generic
+        /Scripting interface, so we get real data immediately instead of
+        waiting for the persistent script's next natural event (deckery#28
+        — see _KWIN_PUSH_ONCE_SCRIPT's comment). Verified live: loadScript
+        + run() on the returned Script<id> path reliably delivers exactly
+        one Update() call within about a second. Best-effort — any failure
+        here (KWin's Scripting interface unavailable, script path wrong,
+        etc.) just means we fall back to the pre-existing "wait for the
+        next natural event" behavior; never fatal."""
+        try:
+            (script_id,) = connection.call_sync(
+                "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", "loadScript",
+                GLib.Variant("(ss)", (_KWIN_PUSH_ONCE_SCRIPT, "deckery-initial-push")),
+                GLib.VariantType("(i)"), Gio.DBusCallFlags.NONE, 2000, None,
+            ).unpack()
+            connection.call_sync(
+                "org.kde.KWin", f"/Scripting/Script{script_id}", "org.kde.kwin.Script", "run",
+                None, None, Gio.DBusCallFlags.NONE, 2000, None,
+            )
+            connection.call_sync(
+                "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
+                GLib.Variant("(s)", ("deckery-initial-push",)),
+                GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 2000, None,
+            )
+            print("[tracker] requested an immediate push from KWin via /Scripting")
+        except GLib.Error as e:
+            print(f"[tracker] could not request initial push (non-fatal, will wait for next natural event): {e}")
 
     def _on_name_lost(self, connection, name):
         # Most likely another overlay instance is still running — harmless

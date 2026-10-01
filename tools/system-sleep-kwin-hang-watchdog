@@ -1,0 +1,15 @@
+#!/bin/bash
+# Installed by install_kwin_hang_watchdog.sh to:
+#   /etc/systemd/system-sleep/99-kwin-hang-watchdog
+#
+# systemd calls every script in /etc/systemd/system-sleep/ with
+# ($1, $2) = (pre|post, suspend|...) and BLOCKS the sleep/resume
+# transition until it returns -- so this hook must not do any of the
+# actual waiting/capturing itself. It just launches the real watchdog
+# as a detached transient unit and returns immediately.
+case "$1" in
+  post)
+    systemd-run --unit="kwin-hang-watchdog-$$" --quiet \
+      /home/philipp/Programming/deckery-spatnav/tools/kwin_hang_watchdog.sh "$(date +%s)"
+    ;;
+esac
