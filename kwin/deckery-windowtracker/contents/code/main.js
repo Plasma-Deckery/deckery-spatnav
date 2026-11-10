@@ -110,6 +110,19 @@ function snapshotWindows() {
 function pushUpdate() {
     var payload = {
         currentDesktop: workspace.currentDesktop ? workspace.currentDesktop.id : null,
+        // Which real application is currently focused, by pid. Used by
+        // menu_badge_prototype.py to correct the Global Menu dropdown
+        // (app='kded6', always reports (0,0) via AT-SPI — a confirmed bug in
+        // that component): kded6 itself can hold several same-sized ~1x1px
+        // anchor placeholder windows at once (one per app that has ever used
+        // the global menu this session, some possibly stale/left over), so
+        // there is no reliable way to tell which one belongs to the menu
+        // that's actually open right now just from kded6's own window list
+        // (deckery#28). The Global Menu always shows the ACTIVE window's
+        // menu, so its real on-screen position is better approximated by
+        // the active window's own (already correctly, live-tracked) offset
+        // than by guessing among kded6's own anchor windows.
+        activePid: workspace.activeWindow ? workspace.activeWindow.pid : null,
         windows: snapshotWindows()
     };
     callDBus(
@@ -124,6 +137,7 @@ function pushUpdate() {
 workspace.windowAdded.connect(pushUpdate);
 workspace.windowRemoved.connect(pushUpdate);
 workspace.currentDesktopChanged.connect(pushUpdate);
+workspace.windowActivated.connect(pushUpdate);
 
 // minimizedChanged/frameGeometryChanged are per-window signals; hook them on
 // every window we see. frameGeometryChanged covers move/resize, so the

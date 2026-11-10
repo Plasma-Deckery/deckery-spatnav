@@ -417,3 +417,188 @@ anbieten. Nutzer weiß selbst noch nicht, was das konkret sein könnte ("ich wei
 jetzt noch nicht was das sein könnte ehrlich gesagt") — nur die generelle Richtung:
 "aus AT-SPI noch einiges an Modernisierung rausholen", über reine Navigation hinaus.
 **Nicht weiter ausgearbeitet, nur als Richtung vermerkt** für spätere Sessions.
+
+---
+
+## 20. Offset-Korrektur-Saga: Regression-Postmortem (Session 2026-10-09 bis 2026-10-12)
+
+**Status beim Pausieren: REGRESSION.** Wir hatten zwischenzeitlich einen Stand, der
+vom Nutzer explizit als gut bestätigt wurde, und sind seitdem durch mehrere
+Nachbesserungen in einen schlechteren Zustand geraten als den ursprünglichen. Diese
+Sektion hält fest, was zuletzt sicher funktionierte, was wir seitdem kaputtgemacht
+haben, und warum — bevor hier irgendjemand (menschlich oder KI) weiterpatcht, ohne
+diese Geschichte zu kennen.
+
+### 20.1 Der Stand, der nachweislich gut funktionierte
+
+Nach der PID-Keying-Korrektur für kded6 (Submenüs erben die Korrektur ihres
+Eltern-PIDs, s.o.) bestätigte der Nutzer explizit: *"Ja, die beiden Ebenen stimmen
+jetzt."* Das war VOR dem active-pid-Umbau.
+
+Danach, nach dem Umbau auf **aktives-Fenster-Offset statt eigenem-Menü-PID-Offset**
+(ausgelöst durch den vom Nutzer zurecht als unautorisiert kritisierten
+"kleinstes-Fenster"-Versuch — s.u.), bestätigte das Log einen stabilen Zustand: beim
+Öffnen/Submenü-Öffnen/Schließen/Wiederöffnen blieb der Offset über mehrere
+Render-Zyklen hinweg exakt `(7, 63.72727272727273)`, kein einziger Sprung. Das war
+der Code-Zustand:
+
+```python
+def _resolve_correction_offset(self, menu):
+    pid = Atspi.Accessible.get_process_id(menu)
+    if pid in self._broken_pids:
+        return self._active_offset(), pid
+    rect = Atspi.Component.get_extents(menu, Atspi.CoordType.SCREEN)
+    if rect.x > 0 or rect.y > 0:
+        return (0, 0), pid          # nicht exakt (0,0) -> gilt als schon korrekt
+    offset = self._active_offset()  # Offset des AKTIVEN Fensters, nicht des Menü-PIDs
+    if offset != (0, 0):
+        self._broken_pids.add(pid)
+    return offset, pid
+
+def _active_offset(self):
+    active_pid = self._window_tracker.active_pid
+    return self._window_tracker.client_offset_by_pid.get(active_pid, (0, 0))
+```
+
+Kurz: **exakt `(0,0)` → Offset des aktiven Fensters verwenden; alles andere → gilt
+als schon korrekt, keine Korrektur.** Einfach, schmal, und für die damals
+getesteten Fälle (kded6 Global Menu, mehrstufige Submenüs, Fenster-Verschiebung)
+nachweislich stabil.
+
+### 20.2 Was seitdem passiert ist — Chronologie
+
+1. **Fremdeinwirkung (nicht unser Fehler, aber Auslöser):** Der Nutzer schickte eine
+   Nachricht versehentlich in eine andere, parallele Claude-Session statt hierher.
+   Diese Session machte eigene Änderungen an denselben Dateien — additiv (ein
+   `ATSPIEventSink` für Makima-IPC, harmlos) — UND lud offenbar das persistente
+   KWin-Tracker-Skript über dieselbe Ad-hoc-`/Scripting`-Route neu, die wir selbst
+   schon einmal benutzt hatten und die das Skript von "dauerhaft aktiv" in
+   "läuft einmal, dann inaktiv" kippt (derselbe Fehler, den wir vorher schon einmal
+   mit `qdbus-qt6 org.kde.KWin /KWin reconfigure` repariert hatten). Dieses
+   Zusammentreffen hat vermutlich die anschließende Verwirrung ("komplett falsch,
+   wieder alles bei 0,0") mitverursacht — nicht nur unser Code.
+
+2. **Neuer, echter Fund:** Das System-Settings-/Dolphin-Hamburger-Menü (Kirigami-
+   Popup) meldet eine Position, die NICHT exakt `(0,0)` ist (z.B. `(230,41)`),
+   aber trotzdem falsch — window-relativ statt Bildschirm-absolut, exakt dieselbe
+   Fensterrelativitäts-Bug-Klasse, die `deckery_filter.py` für normale Elemente
+   schon lange kennt und korrigiert (`resolve_offset()`). Unser exakt-`(0,0)`-Gate
+   aus 20.1 erkennt das nicht, lässt diese Menüs unkorrigiert.
+
+3. **Reaktion darauf — zu groß gedacht:** Statt das Gate gezielt zu erweitern, habe
+   ich `_resolve_correction_offset` komplett durch `deckery_filter.resolve_offset()`
+   ersetzt — angewendet auf den EIGENEN PID jedes Menüs, bedingungslos, mit kded6
+   als einzigem (namensbasiertem) Sonderfall. Das hat den Kirigami-Fall gelöst,
+   aber **das Systemtray-Flyout kaputtgemacht** (gehostet von `kwin_wayland`
+   selbst, PID ohne eigenes von `resolve_offset()` matchbares Fenster — fällt
+   immer auf `(0,0)` zurück, keine Korrektur, Badges "weit unten rechts").
+
+4. **Re-Kombination der Signale:** exakt `(0,0)` → aktives Fenster (deckt kded6 UND
+   das kwin_wayland-Tray ab); sonst `resolve_offset()` versuchen, nur übernehmen
+   wenn kein Fallback. Für den konkret getesteten Kirigami-Fall korrekt — aber:
+
+5. **Nächster Fund:** `resolve_offset()`s exakter `(pid, caption)`-Treffer ist
+   unzuverlässig, wenn ein PID mehrere Fenster mit IDENTISCHER Caption hostet —
+   nicht nur kded6 (`caption='kded6'`), sondern auch `plasmashell`
+   (`caption='plasmashell'` für Tray-Flyouts, Fenstermenü-Popup, OSDs etc.
+   gleichermaßen). Badges landeten hunderte Pixel daneben.
+
+6. **Generalisierter Fix (nutzerseitig gewünscht statt Namens-Sonderfall):**
+   `deckery_tracker.py` zählt jetzt, wie viele Fenster sich einen `(pid,caption)`-
+   Schlüssel pro Payload teilen (`client_offset_by_key_count`); `resolve_offset()`
+   vertraut dem exakten Match nur noch bei Eindeutigkeit (`count == 1`).
+
+7. **Neuester, noch ungelöster Fund:** Für genau dasselbe `plasmashell`-Menü wechselt
+   der berechnete Offset MITTEN im selben offenen Menü von `(1098,254)` auf
+   `(486,24)` — und der zweite Wert ist exakt identisch mit der rohen, unkorrigierten
+   Position selbst. Addition verdoppelt sie dann (`486+486=972` statt `486`).
+   Strukturelle Ursache vermutet: `resolve_offset()`s Modell geht grundsätzlich davon
+   aus, der gefundene Wert sei ein **Delta**, das zur fensterrelativen Rohposition
+   addiert werden muss — das gilt für normale Elemente immer, aber nicht
+   zwangsläufig für ein Menü, dessen Rohposition bereits bildschirmabsolut ist UND
+   bei dem `resolve_offset()` zufällig auf dasselbe (inzwischen unabhängig von KWin
+   getrackte) Popup-Fenster trifft. Dann ist der gefundene Wert keine Korrektur,
+   sondern schlicht die (schon korrekte) Position selbst — Addition ist falsch,
+   es müsste eine Ersetzung sein. **Nicht weiter verfolgt, nur hier festgehalten.**
+
+### 20.3 Zu hinterfragende Annahmen
+
+- **"Eine einzige, für alle Menütypen gültige Korrekturfunktion ist möglich."**
+  Fraglich. Die vier gefundenen Fehlerklassen (kded6, kwin_wayland-Tray,
+  Kirigami-Popups, plasmashell-Doppelkorrektur) könnten strukturell verschiedene
+  Dinge sein, die zufällig alle als "Position ist falsch" auftreten, aber
+  unterschiedliche Korrekturen brauchen (Ersetzung vs. Addition, Delta vs.
+  Absolutwert) statt einer gemeinsamen.
+- **"`resolve_offset()` aus der Produktions-Pipeline ist 1:1 auf Menüs übertragbar."**
+  War die Prämisse von Schritt 3 oben. `resolve_offset()` wurde für Elemente
+  INNERHALB eines bekannten Fensters entworfen (Delta-Semantik passt dort immer).
+  Menüs sind selbst manchmal eigenständige Top-Level-Surfaces mit eigener,
+  unabhängig von ihrem "Elternfenster" korrekter Position — dafür passt das Modell
+  nicht ohne Weiteres.
+- **"Mehr Allgemeingültigkeit ist immer besser als ein benannter Sonderfall."**
+  Der Nutzer hat das in 20.2 Schritt 6 bewusst so gewählt (statt kded6+plasmashell
+  hart zu kodieren) — nachvollziehbar als Prinzip, hat aber in Schritt 7 sofort den
+  nächsten, subtileren Fehler freigelegt statt ihn zu lösen. Eventuell ist für ein
+  *Prototyp*-Stadium der schmale, benannte Sonderfall (20.1) tatsächlich die
+  pragmatischere Wahl, auch wenn er nicht jeden Fall abdeckt.
+
+### 20.4 Empfehlung für den Wiedereinstieg
+
+1. Erwägen, `menu_badge_prototype.py`s Offset-Logik auf den **20.1-Stand
+   zurückzusetzen** (exakt-`(0,0)`-Gate + aktives-Fenster-Offset, sonst keine
+   Korrektur) als stabile Basis — er deckt nachweislich kded6, Submenüs und
+   Fenster-Verschiebung ab. Die `resolve_offset()`-Generalisierung (Schritte 3–7)
+   dann als separater, noch nicht spruchreifer Versuch behandeln statt als
+   Fortschritt gegenüber 20.1.
+2. Den Kirigami-Popup-Fall (System Settings/Dolphin-Hamburger-Menü) als bekannte,
+   dokumentierte Lücke stehen lassen, statt ihn um jeden Preis mitzulösen — er war
+   nie Teil des ursprünglich bestätigten Stands.
+3. Bevor weiter an `resolve_offset()` für Menüs gefeilt wird: klären, ob dessen
+   Delta-Semantik für Top-Level-Menü-Surfaces überhaupt das richtige Modell ist
+   (siehe 20.3) — sonst wird hier vermutlich eine fünfte Fehlerklasse gefunden.
+4. Das automatische Screenshot-nach-jedem-Menü-Event-Tooling (`tools/menu_screenshots/`,
+   per `distrobox-host-exec spectacle` mit Retry wegen eines bestätigten
+   Verbindungsaufbau-Race beim ersten Aufruf) hat sich bewährt und sollte für die
+   nächste Testrunde weiterverwendet werden.
+
+### 20.5 Nachtrag: 20.1-Stand gegengetestet (Session 2026-10-15)
+
+Nach dem Zurücksetzen auf 20.1 wurden die zuvor unklaren Fälle gezielt mit
+Screenshots + angereicherten Logs (erster Menüeintrag, Caption des aktiven
+Fensters — zur programmatischen Unterscheidung mehrdeutiger Menünamen) erneut
+getestet. Ergebnis: **20.1 hält.** Alle visuell geprüften Fälle waren korrekt
+oder durch bereits bekannte, separate Ursachen erklärt — keine neue
+Fehlerklasse:
+
+- **Deckery-Tray-Menü + Submenüs** (`plasmashell`, z.B. "Deckery (dev)",
+  "Controller Bindings"): korrekt, `offset=(0,0)` (rohe Position bereits
+  absolut).
+- **Konsole Global Menu + Submenü** (`kded6`): korrekt, `offset=(7,63.7)` via
+  aktives-Fenster-Substitution — wie in 20.1 erwartet.
+- **Fenstermenü "Desktops"/"All Desktops"** (`kwin_wayland`-gehostet,
+  `pid=12959`): Badges werden an plausiblen, korrekten Koordinaten gezeichnet
+  (`_draw`-Log bestätigt), sind aber **unsichtbar** — das Fenstermenü-Popup
+  rendert über unserem Layer-Shell-Overlay. Das ist das **alte, bereits
+  dokumentierte Z-Order-Problem** (xdg_popup-Compositor-Konvention, siehe
+  frühere KWin-`keepBelow`/`layer`-Recherche in diesem Dokument), keine neue
+  Positionierungslücke. Noch kein zuverlässiger Workaround gefunden — die
+  Idee, probehalber "immer ans andere Ende" zu rendern, wurde vom Nutzer
+  selbst als nicht ausgereift eingestuft.
+- **System-Settings-Hamburger-Menü** (Kirigami-Popup): weiterhin falsch, wie
+  erwartet — bekannte, bewusst unkorrigierte Lücke (siehe 20.4 Punkt 2).
+
+**Neuer, separater Fund — Firefox-Menü nach Vollbild→Fenstermodus-Wechsel:**
+Badges erschienen an der Position, die zur alten (linken) Fensterposition
+gepasst hätte, obwohl das Fenster inzwischen rechts auf dem Bildschirm steht
+(Nutzer hatte Firefox zuvor im Vollbildmodus, dann in den Fenstermodus
+gewechselt). Wichtig: `offset=(0,0)` — wir haben hier **gar keine** Korrektur
+angewendet, die rohe AT-SPI-Position wurde unverändert übernommen. Das
+bedeutet: **nicht unsere Korrekturlogik ist falsch**, sondern Firefox selbst
+meldet eine veraltete Position über AT-SPI. Auffällig auch: Das Menü meldet
+eine ANDERE PID (`15111`) als das aktive Firefox-Hauptfenster (`15151`) —
+Firefox' Multi-Prozess-Architektur (Content-Prozess vs. Browser-Prozess).
+Vermutung: der Content-Prozess, der das Menü rendert, hat seine interne
+Vorstellung der Fenstergrenzen nach dem Vollbild-Exit nicht aktualisiert.
+**Außerhalb unseres Einflussbereichs** — kein Korrekturpfad in 20.1 könnte
+das adressieren, da wir für diesen Fall bewusst gar nicht korrigieren.
+Nicht weiter verfolgt, nur hier festgehalten, falls es später wieder auffällt.

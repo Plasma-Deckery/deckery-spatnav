@@ -191,30 +191,40 @@ def resolve_offset(tracker, pid, caption, frame_width=None, frame_height=None):
     the real on-screen offset from the KWin tracker must be added back in.
 
     Try an exact (pid, caption) match first — but only when caption is
-    non-empty. If caption IS empty (e.g. plasmashell — every one of its
-    panels/popups reports "" as its AT-SPI name, so (pid, caption) would
-    collapse them all into the SAME key and only the last-processed one's
-    offset would survive), skip that lookup entirely and, if the caller
-    passed the window's own frame size, try a size-keyed match instead —
-    much more distinguishing for same-pid/empty-caption windows (deckery#28).
-    Bug fixed here (deckery#28, live top-taskbar/left-panel regression):
-    this guard used to be missing, so the ambiguous (pid, "") key in
+    non-empty AND unique for this pid this payload (client_offset_by_key_count
+    == 1). Two ways a caption can fail to identify a single window:
+    - empty (e.g. plasmashell — every one of its panels/popups reports "" as
+      its AT-SPI name, so (pid, "") would collapse them all into the SAME
+      key and only the last-processed one's offset would survive);
+    - non-empty but still shared by several windows of the same pid
+      (confirmed live, deckery#28: kded6's Global Menu anchors AND
+      plasmashell's own window-decoration/Window Menu popup both report the
+      literal app name — 'kded6', 'plasmashell' — as their caption, same
+      collapsing problem, just not caught by an empty-string check).
+    Either way, fall through to a size-keyed match instead when the caller
+    passed the window's own frame size — much more distinguishing for
+    same-pid/same-caption windows (deckery#28). Bug fixed here (deckery#28,
+    live top-taskbar/left-panel regression): this guard used to only check
+    for an empty caption, so the ambiguous (pid, "") key in
     client_offset_by_key was checked — and matched — BEFORE the size-keyed
-    fallback ever got a chance to run, meaning every empty-caption window of
-    a multi-window app silently got whichever one of that app's windows
+    fallback ever got a chance to run, meaning every same-captioned window of
+    a multi-window app/shell-process silently got whichever one of them
     happened to be walked/recorded last (confirmed live: all of plasmashell's
-    panels were drawn at the bottom bar's offset). Then fall back to any
-    offset known for that pid at all (AT-SPI's frame name can differ
+    panels were drawn at the bottom bar's offset; separately, a
+    plasmashell-hosted popup menu landed hundreds of pixels off using
+    whichever other plasmashell surface was processed last). Then fall back
+    to any offset known for that pid at all (AT-SPI's frame name can differ
     slightly from KWin's caption, or be a sub-pane KWin never sees — for
-    empty-caption multi-window apps this is only a last resort since it
+    ambiguous-caption multi-window apps this is only a last resort since it
     inherits the same collapsing problem); then the pid-independent
     caption-only map (sandboxed apps where AT-SPI's pid is the
     xdg-dbus-proxy, not the real app pid — see is_window_visible above);
     only (0, 0) — drawn at the wrong position — if we know nothing about
     this window at all yet."""
-    if caption and (pid, caption) in tracker.client_offset_by_key:
-        return (*tracker.client_offset_by_key[(pid, caption)], False)
-    if not caption and frame_width is not None and frame_height is not None:
+    key = (pid, caption)
+    if caption and tracker.client_offset_by_key_count.get(key, 0) == 1 and key in tracker.client_offset_by_key:
+        return (*tracker.client_offset_by_key[key], False)
+    if frame_width is not None and frame_height is not None:
         size_key = (pid, round(frame_width), round(frame_height))
         if size_key in tracker.client_offset_by_pid_size:
             return (*tracker.client_offset_by_pid_size[size_key], False)

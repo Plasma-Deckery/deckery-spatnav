@@ -72,19 +72,35 @@ Begründung (siehe MENU_HIJACK_DESIGN.md §17 für die volle Herleitung):
 
 ## 4. IPC-Protokoll — Skizze (Details offen)
 
-**Backend → Makima**, schlanke Event-Sprache (Makima soll möglichst wenig über
-AT-SPI selbst wissen müssen):
+**Namensgebung (entschieden):** Das Backend-Modul heißt **ATSPI**, nicht
+"Menu-Hijack" — Menü-Hijacking ist nur das erste Feature, das seine Events nutzt,
+nicht die Identität des Backends. Entsprechend ist die Nachrichtenform generisch:
+**ein Event mit Payload**, nicht eine eigene D-Bus-Methode pro Feature (also kein
+`MenuState(...)` o.ä.). Grob:
+
+```
+Event(typ: string, payload: json)
+```
+
+`typ` unterscheidet die Fälle, `payload` ist je nach `typ` unterschiedlich geformt:
 - Element fokussiert (mit Typ/Rolle)
 - Element nicht mehr fokussiert
 - Menü geöffnet / geschlossen (mit stabiler Identität)
 - Untermenü geöffnet / geschlossen (eigene Identität, unabhängig vom äußeren Menü —
   siehe MENU_HIJACK_DESIGN.md §8 zur Notwendigkeit eindeutiger Submenü-Identität)
 
+Makima soll über den Transport hinweg möglichst wenig über AT-SPI selbst wissen
+müssen — neue Event-Typen sollen sich ergänzen lassen, ohne die Schnittstelle
+selbst zu ändern.
+
 **Makima → Decory HUD**: Array von `{Rechteck, Anheft-Seite, Label}` — siehe §2.
 
 **Noch offen:**
-- Konkreter IPC-Transport (D-Bus wie der Rest des Projekts, oder etwas anderes?)
-- Exaktes Nachrichtenformat/Schema
+- Konkreter IPC-Transport (D-Bus wie der Rest des Projekts, oder etwas anderes?) —
+  Makima hat mit `org.makima.watcher`/`WindowActivated` (kde.rs) bereits ein
+  Push-per-Methodenaufruf-Muster etabliert; naheliegend, dasselbe Muster für
+  `Event(typ, payload)` zu verwenden, statt D-Bus-Signale einzuführen.
+- Exaktes Payload-Schema pro Event-Typ/Versionierung
 - Wie granular die "Element fokussiert"-Events sein sollen (nur Menüs, oder auch
   normale Fokus-Wechsel außerhalb von Menüs? Siehe §6)
 

@@ -23,8 +23,17 @@ wires the on_update callback to trigger a debounced re-walk.
 
 import json
 import os
+import time
 
 from gi.repository import GLib, Gio
+
+
+def _ts():
+    """Millisecond wall-clock timestamp for correlating log lines across
+    processes/modules when diagnosing timing-sensitive bugs (deckery#28) —
+    cheaper than re-running with a debugger, and survives in scrollback."""
+    return time.strftime("%H:%M:%S", time.localtime()) + f".{int(time.time() * 1000) % 1000:03d}"
+
 
 TRACKER_BUS_NAME = "org.deckery.WindowTracker"
 TRACKER_OBJECT_PATH = "/WindowTracker"
@@ -81,6 +90,11 @@ class WindowTracker:
                                   fallback offset, same reasoning
       client_offset_by_key    -- {(pid, caption): (x, y)} on-screen offset
                                   to add to AT-SPI's window-relative extents
+      client_offset_by_key_count -- {(pid, caption): int}, how many windows
+                                  this payload reported under that exact key
+                                  — resolve_offset() only trusts an entry in
+                                  client_offset_by_key when this is 1 (see
+                                  its own comment above)
       client_offset_by_pid    -- {pid: (x, y)}, fallback offset when the
                                   exact (pid, caption) key misses
       client_offset_by_pid_size -- {(pid, width, height): (x, y)}, fallback
@@ -103,6 +117,13 @@ class WindowTracker:
                                   because plasmashell panels all have empty
                                   captions. Empty set if KWin doesn't expose
                                   the hidden flag (safe no-op in that case).
+      active_pid                -- pid of the currently-focused window, or
+                                  None until the first Update() arrives.
+                                  Used by menu_badge_prototype.py to correct
+                                  the Global Menu dropdown's position via the
+                                  focused app's own (reliable) offset instead
+                                  of kded6's own ambiguous anchor windows
+                                  (deckery#28).
     """
 
     def __init__(self, on_update=None):
@@ -117,9 +138,11 @@ class WindowTracker:
         self.caption_visible_global = {}
         self.caption_offset_global = {}
         self.client_offset_by_key = {}
+        self.client_offset_by_key_count = {}
         self.client_offset_by_pid = {}
         self.client_offset_by_pid_size = {}
         self.hidden_pid_size_keys = set()
+        self.active_pid = None
 
         self._pending_refresh_id = None
 
@@ -142,7 +165,7 @@ class WindowTracker:
             None,
             None,
         )
-        print(f"[tracker] registered {TRACKER_OBJECT_PATH} on {name}, waiting for KWin updates...")
+        print(f"[{_ts()}] [tracker] registered {TRACKER_OBJECT_PATH} on {name}, waiting for KWin updates...")
         self._request_initial_push(connection)
 
     def _request_initial_push(self, connection):
@@ -170,16 +193,16 @@ class WindowTracker:
                 GLib.Variant("(s)", ("deckery-initial-push",)),
                 GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 2000, None,
             )
-            print("[tracker] requested an immediate push from KWin via /Scripting")
+            print(f"[{_ts()}] [tracker] requested an immediate push from KWin via /Scripting")
         except GLib.Error as e:
-            print(f"[tracker] could not request initial push (non-fatal, will wait for next natural event): {e}")
+            print(f"[{_ts()}] [tracker] could not request initial push (non-fatal, will wait for next natural event): {e}")
 
     def _on_name_lost(self, connection, name):
         # Most likely another overlay instance is still running — harmless
         # for this prototype, just means we won't get live desktop-
         # membership data and the walk falls back to VISIBLE+SHOWING-only
         # filtering.
-        print(f"[tracker] FAILED to own {name} — is another overlay instance still running?")
+        print(f"[{_ts()}] [tracker] FAILED to own {name} — is another overlay instance still running?")
 
     def _on_method_call(self, connection, sender, object_path, interface_name, method_name, parameters, invocation):
         if method_name != "Update":
@@ -189,12 +212,13 @@ class WindowTracker:
         try:
             payload = json.loads(payload_json)
         except json.JSONDecodeError as e:
-            print(f"[tracker] bad JSON from KWin script: {e}")
+            print(f"[{_ts()}] [tracker] bad JSON from KWin script: {e}")
             invocation.return_value(None)
             return
 
         current = payload.get("currentDesktop")
         windows = payload.get("windows", [])
+        self.active_pid = payload.get("activePid")
         visible_pids = set()
         # pid alone is too coarse for apps with several top-level KWin
         # windows on DIFFERENT desktops (e.g. System Settings with more than
@@ -216,6 +240,21 @@ class WindowTracker:
         # transform, so every element's reported position is relative to its
         # own window's client area, not the real screen.
         client_offset_by_key = {}
+        # How many windows this payload reported under each (pid, caption)
+        # key — lets resolve_offset() (deckery_filter.py) distinguish "this
+        # key identifies exactly one real window" from "multiple windows
+        # share this exact caption, the match is a coin flip." Needed
+        # because an app's NAME isn't always a unique window title: shell
+        # processes that host several popups under the SAME literal caption
+        # (confirmed live, deckery#28: kded6's Global Menu anchors all
+        # report caption='kded6'; plasmashell's many popups — tray flyouts,
+        # the window-decoration/Window Menu popup, OSDs — all report
+        # caption='plasmashell') would otherwise silently resolve to
+        # whichever one of them this payload happened to process last,
+        # landing menu badges hundreds of pixels off. Generic by design
+        # (counts, doesn't name specific processes) so any future app with
+        # the same pattern is caught automatically.
+        client_offset_by_key_count = {}
         # Fallback when the exact (pid, caption) match misses (e.g. AT-SPI's
         # frame name differs slightly from KWin's caption for some app) —
         # last-seen offset for that pid alone. Better than defaulting to
@@ -261,6 +300,45 @@ class WindowTracker:
         all_known_pids = set()
         caption_visible_global = {}
         caption_offset_global = {}
+        # Smallest-window-wins tiebreak for client_offset_by_pid (below):
+        # apps that host their own tiny on-screen anchor widget PLUS
+        # separate popup/dropdown windows under the same pid (confirmed
+        # live for kded6's Global Menu — a ~1x1px anchor at the real panel
+        # button position, alongside the dropdown's own much larger popup
+        # window(s), both pid-tagged identically) would otherwise have
+        # client_offset_by_pid[pid] silently clobbered by whichever window
+        # KWin happened to report last in this payload — observed live as
+        # the SAME still-open menu's correction offset changing value
+        # (55,59) -> (707,59) -> (820,59) across consecutive Update() calls,
+        # each one coinciding with one of its own popup windows appearing in
+        # workspace.windowList(). The anchor is reliably the smallest window
+        # for that pid, so prefer it deterministically instead of "last one
+        # wins" (deckery#28).
+        # NOT smallest-area-wins (tried that, reverted — see below).
+        # Correct tiebreak: prefer normalWindow=True (the actual top-level
+        # app window) over any smaller transient helper window sharing the
+        # same pid; among equally-ranked candidates, smallest area wins.
+        #
+        # Smallest-area-only was tried first for the kded6 Global Menu case
+        # (a ~1x1px anchor placeholder alongside the dropdown's own much
+        # larger popup window(s), both pid-tagged identically — "last one
+        # wins" let the popup clobber the anchor's offset). But smallest-
+        # area-ONLY is wrong in general: confirmed live for Konsole
+        # (pid=13377) that it ALSO has two windows — its real main window
+        # (caption 'user : bash — Konsole', large) and an unrelated
+        # small transient helper window (empty caption, position changes
+        # independently) — smallest-area picked the small transient one
+        # EVERY time, silently overriding the real window's correct,
+        # already-tracked offset with a wrong, drifting one (deckery#28).
+        # normalWindow is reliably True for the real window and False for
+        # both kded6's own anchor AND Konsole's transient helper, so
+        # ranking on it first fixes both cases at once.
+        client_offset_by_pid_rank = {}
+        # Debug only (deckery#28): every (caption, width, height, area,
+        # normalWindow) candidate seen per pid this payload, so a pid whose
+        # client_offset_by_pid value changes between payloads can be
+        # diagnosed from the log instead of guessed at.
+        _debug_candidates_by_pid = {}
         for w in windows:
             pid = w.get("pid")
             if not pid or pid < 0:
@@ -291,7 +369,16 @@ class WindowTracker:
             if geo:
                 offset = (geo.get("x", 0), geo.get("y", 0))
                 client_offset_by_key[(pid, caption)] = offset
-                client_offset_by_pid[pid] = offset
+                client_offset_by_key_count[(pid, caption)] = client_offset_by_key_count.get((pid, caption), 0) + 1
+                area = geo.get("width", 0) * geo.get("height", 0)
+                is_normal = bool(w.get("normalWindow"))
+                rank = (0 if is_normal else 1, area)
+                _debug_candidates_by_pid.setdefault(pid, []).append(
+                    (caption, geo.get("width", 0), geo.get("height", 0), area, is_normal, offset)
+                )
+                if pid not in client_offset_by_pid_rank or rank < client_offset_by_pid_rank[pid]:
+                    client_offset_by_pid[pid] = offset
+                    client_offset_by_pid_rank[pid] = rank
                 size_key = (pid, round(geo.get("width", 0)), round(geo.get("height", 0)))
                 client_offset_by_pid_size[size_key] = offset
                 if caption:
@@ -313,10 +400,16 @@ class WindowTracker:
         self.caption_visible_global = caption_visible_global
         self.caption_offset_global = caption_offset_global
         self.client_offset_by_key = client_offset_by_key
+        self.client_offset_by_key_count = client_offset_by_key_count
         self.client_offset_by_pid = client_offset_by_pid
         self.client_offset_by_pid_size = client_offset_by_pid_size
         self.hidden_pid_size_keys = hidden_pid_size_keys
-        print(f"[tracker] update: currentDesktop={current}, visible_pids={sorted(visible_pids)}")
+        print(f"[{_ts()}] [tracker] update: currentDesktop={current}, visible_pids={sorted(visible_pids)}")
+        for pid, candidates in _debug_candidates_by_pid.items():
+            if len(candidates) > 1:
+                print(f"[{_ts()}] [tracker] pid={pid} has {len(candidates)} windows sharing "
+                      f"client_offset_by_pid — chose offset={client_offset_by_pid[pid]} "
+                      f"(normalWindow first, smallest area tiebreak) from candidates={candidates}")
 
         # Trigger an immediate (debounced) re-walk instead of waiting for the
         # next periodic tick — otherwise the overlay keeps showing the
