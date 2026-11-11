@@ -71,6 +71,11 @@ def _rect_of(acc):
     return Rect(r.x, r.y, r.width, r.height)
 
 
+def _same_rect(a, b, tolerance=1.0):
+    return (abs(a.x - b.x) <= tolerance and abs(a.y - b.y) <= tolerance
+            and abs(a.w - b.w) <= tolerance and abs(a.h - b.h) <= tolerance)
+
+
 def _inside(rect, clips):
     for c in clips:
         rect = rect.intersect(c)
@@ -93,10 +98,10 @@ def read_window(frame, toolkit=""):
     t0 = time.monotonic()
     out = []
 
-    def walk(node, clips, depth, target_ancestor_role=None):
+    def walk(node, clips, depth, target_ancestor=None):
         """Returns True if node or a descendant produced an element.
-        target_ancestor_role: role of the nearest ancestor that is itself a
-        target (eligibility is known pre-order from role + states)."""
+        target_ancestor: (role, rect) of the nearest ancestor that is itself
+        a target (eligibility is known pre-order from role + states)."""
         stats.nodes += 1
         role = AXObject.get_role_name(node) or ""
         states = AXObject.get_state_set(node)
@@ -111,6 +116,8 @@ def read_window(frame, toolkit=""):
                     return False
                 child_clips = clips + (rect,)
         relevant = is_relevant_element(node, role, states)
+        if relevant and rect is None:
+            rect = _rect_of(node)
         produced = False
         if depth >= MAX_DEPTH or (prune_hidden and not showing and depth > 0):
             stats.pruned += depth < MAX_DEPTH
@@ -121,9 +128,9 @@ def read_window(frame, toolkit=""):
         elif role == "popup menu":
             produced = walk_menu(node, child_clips, depth)
         else:
-            child_ancestor_role = role if relevant else target_ancestor_role
+            child_ancestor = (role, rect) if relevant else target_ancestor
             for child in AXObject.iter_children(node):
-                produced = walk(child, child_clips, depth + 1, child_ancestor_role) or produced
+                produced = walk(child, child_clips, depth + 1, child_ancestor) or produced
         if not relevant:
             return produced
         if produced and role in SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES:
@@ -133,10 +140,12 @@ def read_window(frame, toolkit=""):
         if rect.empty or not _inside(rect, clips):
             return produced
         name = AXObject.get_name(node) or ""
-        if not name and role == target_ancestor_role:
-            # Test desktop 2026-11-11, System Settings theme tiles: an
-            # unnamed radio button (the thumbnail) inside the named radio
-            # button 'Breeze' — one control, two targets. Keep the named one.
+        if target_ancestor is not None and role == target_ancestor[0] and \
+                (not name or _same_rect(rect, target_ancestor[1])):
+            # One control, two targets — keep the outer one. Test desktop
+            # 2026-11-11: System Settings theme tiles (unnamed radio button
+            # inside radio button 'Breeze'); Plasma panel (button inside
+            # button with the same rect: launcher, tray icons, clock).
             return produced
         out.append(RawElement(element_id(node), role, name, rect, clips, node))
         return True

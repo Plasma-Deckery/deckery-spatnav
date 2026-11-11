@@ -366,15 +366,16 @@ def check(verbose=True):
     # Nested duplicates: an unnamed target inside a same-role target of the
     # same window is the same control twice.
     for inner in items:
-        if inner["name"]:
-            continue
         ri = Rect(*inner["rect"])
         for outer in items:
             if outer is inner or outer["role"] != inner["role"] or outer["window"] != inner["window"]:
                 continue
-            cut = ri.intersect(Rect(*outer["rect"]))
-            if cut is not None and cut.area >= ri.area - 1 and Rect(*outer["rect"]).area > ri.area:
-                failures.append(f"nested duplicate: unnamed {inner['role']} inside {outer['name']!r}")
+            ro = Rect(*outer["rect"])
+            cut = ri.intersect(ro)
+            same = abs(ri.x - ro.x) <= 1 and abs(ri.y - ro.y) <= 1 and abs(ri.w - ro.w) <= 1 and abs(ri.h - ro.h) <= 1
+            if same and outer["id"] < inner["id"] or (not inner["name"] and cut is not None
+                                                      and cut.area >= ri.area - 1 and ro.area > ri.area):
+                failures.append(f"nested duplicate: {inner['role']} {inner['name']!r} inside {outer['name']!r}")
                 break
     for e in stale_targets(items):
         failures.append(f"stale: {e['role']} {e['name']!r} published at {[round(c) for c in e['rect']]}")

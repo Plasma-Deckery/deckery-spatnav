@@ -142,6 +142,21 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
 - **Dolphin** feuert beim Öffnen eines Menüs ~4000 `state-changed:defunct`.
 - **Uhr/CPU-Labels** im Panel feuern Namens-Events im Sekundentakt → werden nur
   noch als Namens-Patch behandelt.
+- **GTK4** setzt nie `ENABLED`, nur `SENSITIVE`; Fenster-Koordinaten relativ
+  zum Client, nicht zum Buffer (Schattenrand 25 px).
+- **Qt-Untermenüs** melden Koordinaten relativ zum Elternmenü → eigene Frames,
+  beim Elternteil übersprungen, auf eigene Lage umgerechnet.
+- **Plasma 6.6:** Flyouts (Kalender, Tray) **sind** KWin-Fenster
+  (`appletPopup`, Layer 3) mit passendem AT-SPI-Frame → keine Sonderbehandlung
+  mehr nötig (alte Annahme aus `deckery_filter.py` überholt). Desktop-Icons
+  sind benannte `canvas`. Panel-Knöpfe doppelt verschachtelt (gleiches Rechteck).
+- **QML-Animationen** ohne Events → ein Nachlese-Durchgang 700 ms nach jedem
+  eventgetriebenen Neueinlesen; nachlaufendes Debounce gegen Event-Stürme.
+- **Nächster Performance-Hebel:** QML-Flyout (Kalender) 362 Knoten ≈ 1 s →
+  gebündelte asynchrone D-Bus-Aufrufe (`GetChildren` etc.) statt libatspi
+  Einzelaufrufe.
+- Nicht getestet: Electron/Chromium (Flatpak-Profile sind im Test-Desktop die
+  echten → keine Tests damit), Tastaturfokus.
 - KWin-Scripts: `frameGeometry` lässt sich nur aus QML-Scripts setzen
   (`Qt.rect`); einfache Scripts ignorieren die Zuweisung stillschweigend.
 

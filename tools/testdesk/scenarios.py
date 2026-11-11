@@ -65,6 +65,10 @@ def window_frame(cls):
     raise ScenarioFailed(f"no window of class {cls}")
 
 
+def has_window_class(cls):
+    return any(w["cls"] == cls for w in ctl.kwin_eval(ctl._WINDOWS_JS))
+
+
 def has_window(cls):
     return any(w["cls"] == cls and w["normal"] for w in ctl.kwin_eval(ctl._WINDOWS_JS))
 
@@ -91,6 +95,9 @@ def scenario_occlusion():
     """systemsettings and dolphin overlap; whichever is on top must hide the
     other's targets in the overlap, partially covered ones keep only their
     visible part."""
+    missing = [c for c in ('systemsettings', 'org.kde.dolphin') if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_move("systemsettings", 0, 0, 760, 700)
     ctl.kwin_move("org.kde.dolphin", 420, 80, 700, 600)
     ctl.kwin_raise("org.kde.dolphin")
@@ -118,6 +125,9 @@ def scenario_occlusion():
 
 def scenario_move():
     """Moving a window shifts its targets exactly, keeps their ids."""
+    missing = [c for c in ('systemsettings',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_raise("systemsettings")
     ctl.kwin_move("systemsettings", 0, 0, 760, 700)
     _, before = settle()
@@ -149,6 +159,9 @@ def scenario_scroll():
     """Scrolling the System Settings sidebar (QML ListView). Far scrolls
     recycle delegates (children-changed events); a small scroll moves rows
     without any AT-SPI event — published positions must follow anyway."""
+    missing = [c for c in ('systemsettings',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_raise("systemsettings")
     ctl.kwin_move("systemsettings", 0, 0, 760, 700)
     _, items = settle()
@@ -182,6 +195,9 @@ def scenario_menu():
     own KWin window above everything) must become targets, and nothing
     under the menu may stay a target. Escape closes it again: its items
     must disappear."""
+    missing = [c for c in ('org.kde.dolphin',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_raise("org.kde.dolphin")
     ctl.kwin_move("org.kde.dolphin", 300, 60, 800, 600)
     _, before = settle()
@@ -221,6 +237,9 @@ def scenario_submenu():
     both popups' items are targets, the submenu covers its parent's items
     where it overlaps; Escape twice closes both. (Dolphin hides its menu
     bar by default.)"""
+    missing = [c for c in ('org.kde.dolphin',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_raise("org.kde.dolphin")
     ctl.kwin_move("org.kde.dolphin", 100, 60, 800, 600)
     _, before = settle()
@@ -253,8 +272,66 @@ def scenario_submenu():
     return f"{len(popups)} popups, items per popup {[len(v) for v in by_window.values()]}"
 
 
+def wait_for(predicate, timeout_s=6.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        _, items = ctl.elements()
+        if predicate(items):
+            return items
+        time.sleep(0.2)
+    return ctl.elements()[1]
+
+
+def scenario_flyout():
+    """Needs plasmashell. Clicking the panel clock opens the calendar
+    flyout (a KWin appletPopup window in Plasma 6.6): its controls become
+    targets within 1.5 s, nothing under it stays a target, Escape closes
+    it and its targets go away."""
+    if not has_window_class("plasmashell"):
+        return "skipped (no plasmashell)"
+    _, before = settle()
+    clock = next((e for e in before if e["name"] in ("Digital Clock",) or e["name"].startswith("Today is")), None)
+    expect(clock, "no clock target in the panel")
+    before_windows = {w["id"] for w in ctl.kwin_eval(ctl._WINDOWS_JS)}
+    t0 = time.monotonic()
+    eis("click", *clock["target"])
+    flyout = None
+    deadline = time.monotonic() + 3
+    while flyout is None and time.monotonic() < deadline:
+        flyout = next((w for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["id"] not in before_windows), None)
+    expect(flyout, "no new KWin window after clicking the clock")
+    items = wait_for(lambda items: any(e["window"] == flyout["id"] for e in items), 1.5)
+    latency = time.monotonic() - t0
+    screenshot("flyout-open")
+    mine = [e for e in items if e["window"] == flyout["id"]]
+    expect(mine, f"flyout has no targets 1.5 s after opening")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"with flyout open: {failures[:3]}")
+    eis("key", "esc")
+    items = wait_for(lambda items: not any(e["window"] == flyout["id"] for e in items), 3)
+    expect(not any(e["window"] == flyout["id"] for e in items), "flyout targets remain after Escape")
+    return f"{len(mine)} flyout targets after {latency:.1f}s"
+
+
+def scenario_desktop_icons():
+    """Needs plasmashell. Desktop icons (Plasma FolderView canvases) are
+    targets where the desktop is visible."""
+    if not has_window_class("plasmashell"):
+        return "skipped (no plasmashell)"
+    for cls in ("systemsettings", "org.kde.dolphin"):
+        if has_window(cls):
+            ctl.kwin_move(cls, 400, 150, 700, 450)
+    _, items = settle()
+    icons = [e for e in items if e["role"] == "canvas" and e["name"]]
+    expect(icons, "no desktop icon targets")
+    return f"{len(icons)} icons: {[e['name'] for e in icons]}"
+
+
 def scenario_desktops():
     """Window on another virtual desktop is not a target; switching shows it."""
+    missing = [c for c in ('org.kde.dolphin',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     ctl.kwin_eval("(function(){ if (workspace.desktops.length < 2) "
                   "workspace.createDesktop(1, 'Second'); return workspace.desktops.length; })()")
     ctl.kwin_eval(ctl._window_js("org.kde.dolphin",
@@ -263,7 +340,10 @@ def scenario_desktops():
     screenshot("desktops-first")
     expect(not any(e["window"] == window_id("org.kde.dolphin") for e in items),
            "dolphin (moved to desktop 2) still has targets on desktop 1")
-    frames_on_first = {e["window"] for e in items}
+    sticky = {w["id"] for w in ctl.kwin_eval(
+        "(function(){var o=[];var s=workspace.stackingOrder;for(var i=0;i<s.length;i++)"
+        "if(s[i].onAllDesktops)o.push({id:String(s[i].internalId)});return o;})()")}
+    frames_on_first = {e["window"] for e in items} - sticky
     ctl.kwin_eval("(function(){ workspace.currentDesktop = workspace.desktops[1]; return 1; })()")
     _, items2 = settle()
     screenshot("desktops-second")
@@ -296,6 +376,9 @@ def scenario_multimonitor():
     """Needs TESTDESK_OUTPUTS=2. Window on the second output, a window
     spanning both (parts in the gap between outputs dropped), then the
     second output at a different scale."""
+    missing = [c for c in ('org.kde.dolphin',) if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
     outs = outputs()
     if len(outs) < 2:
         return "skipped (single output)"
@@ -372,6 +455,8 @@ SCENARIOS = {
     "scroll": scenario_scroll,
     "menu": scenario_menu,
     "submenu": scenario_submenu,
+    "flyout": scenario_flyout,
+    "desktop_icons": scenario_desktop_icons,
     "desktops": scenario_desktops,
     "multimonitor": scenario_multimonitor,
     "coverage": scenario_coverage,

@@ -18,6 +18,7 @@ test desktop's freshness check, tools/testdesk/ctl.py stale_targets):
   ACTIVE_POLL_MS and the window is re-read if any of them moved."""
 
 import dataclasses
+import os
 import time
 
 import gi
@@ -32,7 +33,17 @@ from .reader import live_rect, read_window
 from .scene import LAYER_OVERLAY
 from .visibility import visible_regions
 
+# Trailing debounce: an update runs once events have been quiet for
+# CONTENT_DEBOUNCE_MS, but never later than CONTENT_MAX_DELAY_MS after the
+# first one — plasmashell fires hundreds of state-changed events while a
+# flyout opens (test desktop 2026-11-11), each re-read costing up to 600 ms.
 CONTENT_DEBOUNCE_MS = 150
+CONTENT_MAX_DELAY_MS = 600
+# One follow-up re-read this long after an event-driven one: QML animates
+# layout changes without bounds-changed events, so the first re-read can
+# catch the panel mid-animation (pager added → task buttons sliding right,
+# test desktop 2026-11-11) and nothing would ever correct it.
+SETTLE_REREAD_MS = 700
 ACTIVE_POLL_MS = 300
 # Upper bound on live calls per poll (~0.5 ms each).
 ACTIVE_POLL_MAX_ELEMENTS = 60
@@ -68,7 +79,15 @@ class Backend:
         # their own state-changed:showing events.
         self._popups = {}
         self._content_timer = 0
+        self._first_pending_at = 0.0
+        self._settle_timer = 0
+        self._settle_bus_names = set()
         self._listener = None
+        # KWin windows a frame re-list was already tried for: a window KWin
+        # reports for the first time gets one immediate re-list (a new
+        # flyout/popup's frame is usually there already), after that only
+        # the rate-limited retry.
+        self._relisted_for = set()
 
     # ---- inputs ----
 
@@ -119,6 +138,8 @@ class Backend:
             return
         if bus_name:
             self._dirty_bus_names.add(bus_name)
+            if os.environ.get("DECKERY_DEBUG_EVENTS"):
+                self._log(f"[event] {event.type} {bus_name}")
         self._schedule_update()
 
     def _track_popup(self, event):
@@ -152,8 +173,14 @@ class Backend:
         return frames
 
     def _schedule_update(self):
+        now = time.monotonic()
         if not self._content_timer:
-            self._content_timer = GLib.timeout_add(CONTENT_DEBOUNCE_MS, self._flush_content)
+            self._first_pending_at = now
+        else:
+            GLib.source_remove(self._content_timer)
+        remaining_ms = CONTENT_MAX_DELAY_MS - 1000 * (now - self._first_pending_at)
+        delay = max(0, min(CONTENT_DEBOUNCE_MS, int(remaining_ms)))
+        self._content_timer = GLib.timeout_add(delay, self._flush_content)
 
     def _patch_name(self, eid, source):
         for window_id, (frame_id, size, raw) in self._raw.items():
@@ -172,6 +199,19 @@ class Backend:
         dirty, self._dirty_bus_names = self._dirty_bus_names, set()
         windows, self._dirty_windows = self._dirty_windows, set()
         self._update(reread_bus_names=dirty, reread_windows=windows)
+        if dirty:
+            self._settle_bus_names |= dirty
+            if self._settle_timer:
+                GLib.source_remove(self._settle_timer)
+            self._settle_timer = GLib.timeout_add(SETTLE_REREAD_MS, self._settle_reread)
+        return GLib.SOURCE_REMOVE
+
+    def _settle_reread(self):
+        self._settle_timer = 0
+        dirty, self._settle_bus_names = self._settle_bus_names, set()
+        # Straight to _update: going through _flush_content would schedule
+        # yet another settle pass.
+        self._update(reread_bus_names=dirty)
         return GLib.SOURCE_REMOVE
 
     # ---- core ----
@@ -196,8 +236,10 @@ class Backend:
             self._relist_frames()
         regions = visible_regions(scene)
         self.matches, unmatched = self._match(scene)
-        if any(wid in unmatched for wid in regions) and \
-                time.monotonic() - self._frames_listed_at > FRAME_RELIST_MIN_INTERVAL_S:
+        missing = {wid for wid in regions if wid in unmatched}
+        if missing - self._relisted_for or (
+                missing and time.monotonic() - self._frames_listed_at > FRAME_RELIST_MIN_INTERVAL_S):
+            self._relisted_for |= missing
             self._relist_frames()
             self.matches, unmatched = self._match(scene)
 
@@ -213,14 +255,16 @@ class Backend:
             cached = self._raw.get(window_id)
             bus_name = frame.id.split("/", 1)[0]
             size = (round(window.buffer.w), round(window.buffer.h))
-            if cached is None or cached[0] != frame.id or bus_name in reread_bus_names \
-                    or window_id in reread_windows:
+            reason = ("new" if cached is None else "frame" if cached[0] != frame.id
+                      else "event" if bus_name in reread_bus_names
+                      else "poll/size" if window_id in reread_windows else None)
+            if reason:
                 if "popupWindow" in window.flags and (cached is None or cached[0] != frame.id):
                     self._log(f"[popup] kwin {window.frame} ← {frame.role} {frame.name!r} "
                               f"{frame.width}x{frame.height} ({match.rule})")
                 raw, stats = read_window(frame.accessible, frame.toolkit)
                 self._raw[window_id] = (frame.id, size, raw)
-                reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms")
+                reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms({reason})")
             elif cached[1] != size:
                 self._dirty_windows.add(window_id)
                 self._schedule_update()

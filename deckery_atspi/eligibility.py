@@ -59,6 +59,11 @@ def is_relevant_element(node, role_name=None, state_set=None):
         return False
     if AXUtilitiesState.is_focusable(node, state_set):
         return True
+    # Test desktop 2026-11-11, Plasma desktop (FolderView): each desktop
+    # icon is a named, non-focusable "canvas" whose only focusable child is
+    # a label (and labels are never targets).
+    if role_name == "canvas" and AXObject.get_name(node):
+        return True
     # v2, test desktop 2026-11-11: Qt menu items are SHOWING but never
     # FOCUSABLE (Dolphin context menu, menu bar submenus).
     return role_name in ("list item", "table cell", "tree item",
