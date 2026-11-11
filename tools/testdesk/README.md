@@ -1,0 +1,32 @@
+# Test desktop
+
+An invisible, isolated KDE desktop for testing the v2 backend automatically:
+nested `kwin_wayland --virtual` with its own session D-Bus (→ own AT-SPI bus,
+own KWin scripting) and its own config/data/cache dirs (wiped on start), so
+nothing touches the real desktop or its settings. Deck-like by default:
+1280x800 physical at scale 1.1 (1164x727 logical).
+
+    tools/testdesk/restart_all.sh systemsettings dolphin   # desktop + apps + backend + viewer
+    tools/testdesk/run_box.sh python3 tools/testdesk/scenarios.py [name ...]
+    tools/testdesk/run_box.sh python3 tools/testdesk/ctl.py check
+    tools/testdesk/stop.sh                                 # (on the host)
+
+Screenshots: `$XDG_RUNTIME_DIR/deckery-testdesk/shots/`, logs next to it.
+
+- `start.sh` / `session.sh` / `stop.sh` — lifecycle (host). The session starts
+  `at-spi-bus-launcher` and `at-spi2-registryd` itself (their D-Bus/systemd
+  activation belongs to the real session) and sets the output scale with
+  kscreen-doctor (`--virtual` ignores `--scale` for the output).
+- `run.sh CMD` — host command inside the session; `run_box.sh CMD` — same in
+  the deckery distrobox (Atspi/GTK4 bindings).
+- `ctl.py` — move/raise windows (KWin), find/act on AT-SPI objects, read the
+  backend's published targets, invariant checks (occlusion, freshness against
+  live AT-SPI, ids, target points).
+- `eis_input.py` — real pointer/keyboard input via KWin's EIS
+  (`org.kde.KWin.EIS.RemoteDesktop`, libei through ctypes), reaching only the
+  test desktop. Needed where Qt offers no AT-SPI action (context menus).
+- `scenarios.py` — occlusion, move, scroll (far + small), context menu,
+  virtual desktops, invariants.
+
+Flatpak apps use the real `~/.var/app` profile even here — don't run
+Firefox/Chromium Flatpaks in tests.

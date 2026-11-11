@@ -1,0 +1,509 @@
+{
+ "version": 2,
+ "currentDesktop": "77b18f82-8768-4ff7-95ef-b1edf204fcb6",
+ "activeWindow": "{73eecd66-8f32-490a-9eb6-96aa77852f79}",
+ "outputs": [
+  {
+   "name": "eDP-1",
+   "geometry": {
+    "x": 0,
+    "y": 0,
+    "w": 1164,
+    "h": 727
+   },
+   "scale": 1.1
+  }
+ ],
+ "windows": [
+  {
+   "id": "{86854db4-1b26-44fb-87ef-d8f4fcc62949}",
+   "pid": 14260,
+   "caption": "",
+   "resourceClass": "plasmashell",
+   "layer": 0,
+   "output": "eDP-1",
+   "frame": {
+    "x": 0,
+    "y": 0,
+    "w": 1164,
+    "h": 727
+   },
+   "client": {
+    "x": 0,
+    "y": 0,
+    "w": 1164,
+    "h": 727
+   },
+   "buffer": {
+    "x": 0,
+    "y": 0,
+    "w": 1163.6363636363635,
+    "h": 727.2727272727273
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "desktopWindow",
+    "specialWindow"
+   ]
+  },
+  {
+   "id": "{1b2cde26-0520-406d-b2ee-a51dc0f6076a}",
+   "pid": 15939,
+   "caption": "user : bash \u2014 Konsole",
+   "resourceClass": "org.kde.konsole",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 7,
+    "y": 31,
+    "w": 570.9090909090909,
+    "h": 690
+   },
+   "client": {
+    "x": 7,
+    "y": 63.72727272727273,
+    "w": 570.9090909090909,
+    "h": 657.2727272727273
+   },
+   "buffer": {
+    "x": 7,
+    "y": 63.72727272727273,
+    "w": 570.9090909090909,
+    "h": 657.2727272727273
+   },
+   "desktops": [
+    "3810835a-bd61-4dce-9479-c4736c763b4c"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{2d78ccc3-7fd9-4ea5-baee-8ca10c945a69}",
+   "pid": 16060,
+   "caption": "Trayscale",
+   "resourceClass": "dev.deedles.Trayscale",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 585,
+    "y": 31,
+    "w": 571.8181818181818,
+    "h": 400
+   },
+   "client": {
+    "x": 585,
+    "y": 31,
+    "w": 571.8181818181818,
+    "h": 400
+   },
+   "buffer": {
+    "x": 559.5454545454545,
+    "y": 5.545454545454547,
+    "w": 621.8181818181818,
+    "h": 449.99999999999994
+   },
+   "desktops": [
+    "3810835a-bd61-4dce-9479-c4736c763b4c"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{d1679b18-9137-42cd-a5b1-8148544e8469}",
+   "pid": 15924,
+   "caption": "Quick Settings \u2014 System Settings",
+   "resourceClass": "systemsettings",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 140.6363636363635,
+    "y": 73.27272727272725,
+    "w": 1022.7272727272725,
+    "h": 653.6363636363636
+   },
+   "client": {
+    "x": 140.6363636363635,
+    "y": 105.99999999999997,
+    "w": 1022.7272727272725,
+    "h": 620.9090909090909
+   },
+   "buffer": {
+    "x": 140.6363636363635,
+    "y": 105.99999999999997,
+    "w": 1022.7272727272725,
+    "h": 620.9090909090909
+   },
+   "desktops": [
+    "3810835a-bd61-4dce-9479-c4736c763b4c"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{717e7fe4-8f2c-453c-9ecf-a93f54f2ed09}",
+   "pid": 16205,
+   "caption": "Example Page \u2014 Mozilla Firefox",
+   "resourceClass": "org.mozilla.firefox",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 0,
+    "y": 24,
+    "w": 1163.6363636363635,
+    "h": 703.6363636363636
+   },
+   "client": {
+    "x": 0,
+    "y": 24,
+    "w": 1163.6363636363635,
+    "h": 703.6363636363636
+   },
+   "buffer": {
+    "x": 0,
+    "y": 24,
+    "w": 1163.6363636363635,
+    "h": 703.6363636363636
+   },
+   "desktops": [
+    "31c5e822-7d41-443b-8aed-5fa53aa0fb2b"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{b5dfb766-7772-43e7-95b6-67efe6ca348d}",
+   "pid": 179822,
+   "caption": "Steam",
+   "resourceClass": "steam",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "client": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "buffer": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "desktops": [
+    "0d01cf9b-f15c-42f4-856e-bffb4c195363"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{fd66a3ed-a091-4321-9f01-0f7182e8492d}",
+   "pid": 419027,
+   "caption": "QEMU (Example VM)",
+   "resourceClass": "Qemu-system-x86_64",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "client": {
+    "x": 7,
+    "y": 64,
+    "w": 1150,
+    "h": 657
+   },
+   "buffer": {
+    "x": 7,
+    "y": 64,
+    "w": 1150,
+    "h": 657
+   },
+   "desktops": [
+    "f1ec9e58-fa4c-476f-80de-83240264203d"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{73eecd66-8f32-490a-9eb6-96aa77852f79}",
+   "pid": 17114,
+   "caption": "Claude",
+   "resourceClass": "com.anthropic.Claude",
+   "layer": 1,
+   "output": "eDP-1",
+   "frame": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "client": {
+    "x": 7,
+    "y": 31,
+    "w": 1150,
+    "h": 690
+   },
+   "buffer": {
+    "x": -9.363636363636363,
+    "y": 21,
+    "w": 1181.8181818181818,
+    "h": 731.8181818181818
+   },
+   "desktops": [
+    "77b18f82-8768-4ff7-95ef-b1edf204fcb6"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow",
+    "keepBelow"
+   ]
+  },
+  {
+   "id": "{3544d50d-3e97-4513-b19b-d28ffe1447ef}",
+   "pid": 15536,
+   "caption": "Wayland to X Recording bridge \u2014 Xwayland Video Bridge",
+   "resourceClass": "xwaylandvideobridge",
+   "layer": 2,
+   "output": "eDP-1",
+   "frame": {
+    "x": 0,
+    "y": 99,
+    "w": 1,
+    "h": 1
+   },
+   "client": {
+    "x": -99,
+    "y": 0,
+    "w": 100,
+    "h": 100
+   },
+   "buffer": {
+    "x": -99,
+    "y": 0,
+    "w": 100,
+    "h": 100
+   },
+   "desktops": [
+    "3810835a-bd61-4dce-9479-c4736c763b4c"
+   ],
+   "onAllDesktops": false,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow"
+   ]
+  },
+  {
+   "id": "{3913cd04-aeaf-4a28-9fb9-7e6e925778ac}",
+   "pid": 14260,
+   "caption": "",
+   "resourceClass": "plasmashell",
+   "layer": 3,
+   "output": "eDP-1",
+   "frame": {
+    "x": 0,
+    "y": 0,
+    "w": 1164,
+    "h": 40
+   },
+   "client": {
+    "x": 0,
+    "y": 0,
+    "w": 1164,
+    "h": 40
+   },
+   "buffer": {
+    "x": 0,
+    "y": 0,
+    "w": 1163.6363636363635,
+    "h": 40
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "dock",
+    "specialWindow"
+   ]
+  },
+  {
+   "id": "{3e00f89c-8f7c-4e68-a09f-7e02fc6fb037}",
+   "pid": 14260,
+   "caption": "",
+   "resourceClass": "plasmashell",
+   "layer": 3,
+   "output": "eDP-1",
+   "frame": {
+    "x": 0,
+    "y": 55,
+    "w": 66,
+    "h": 616
+   },
+   "client": {
+    "x": 0,
+    "y": 55,
+    "w": 66,
+    "h": 616
+   },
+   "buffer": {
+    "x": 0,
+    "y": 55,
+    "w": 66.36363636363636,
+    "h": 616.3636363636363
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": true,
+   "flags": [
+    "dock",
+    "specialWindow"
+   ]
+  },
+  {
+   "id": "{e735b51b-156c-40bb-9244-65dab22966c1}",
+   "pid": 14260,
+   "caption": "",
+   "resourceClass": "plasmashell",
+   "layer": 3,
+   "output": "eDP-1",
+   "frame": {
+    "x": 1098,
+    "y": 267,
+    "w": 66,
+    "h": 193
+   },
+   "client": {
+    "x": 1098,
+    "y": 267,
+    "w": 66,
+    "h": 193
+   },
+   "buffer": {
+    "x": 1098,
+    "y": 267,
+    "w": 66.36363636363626,
+    "h": 192.72727272727275
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "dock",
+    "specialWindow"
+   ]
+  },
+  {
+   "id": "{299f4905-10f3-4c60-931e-307db134f5f8}",
+   "pid": 14260,
+   "caption": "",
+   "resourceClass": "plasmashell",
+   "layer": 3,
+   "output": "eDP-1",
+   "frame": {
+    "x": 371,
+    "y": 671,
+    "w": 421,
+    "h": 56
+   },
+   "client": {
+    "x": 371,
+    "y": 671,
+    "w": 421,
+    "h": 56
+   },
+   "buffer": {
+    "x": 371,
+    "y": 671,
+    "w": 420.9090909090909,
+    "h": 56.363636363636374
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": true,
+   "flags": [
+    "dock",
+    "specialWindow"
+   ]
+  },
+  {
+   "id": "{f335e59b-b3cf-41a6-a708-15aa330d033d}",
+   "pid": 448262,
+   "caption": "",
+   "resourceClass": "python3.14",
+   "layer": 9,
+   "output": "eDP-1",
+   "frame": {
+    "x": -0.36363636363648766,
+    "y": 24,
+    "w": 1164,
+    "h": 703
+   },
+   "client": {
+    "x": -0.36363636363648766,
+    "y": 24,
+    "w": 1164,
+    "h": 703
+   },
+   "buffer": {
+    "x": -0.36363636363648766,
+    "y": 24,
+    "w": 1163.6363636363635,
+    "h": 702.7272727272726
+   },
+   "desktops": [],
+   "onAllDesktops": true,
+   "minimized": false,
+   "hidden": false,
+   "flags": [
+    "normalWindow"
+   ]
+  }
+ ]
+}
