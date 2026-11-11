@@ -215,6 +215,9 @@ class Backend:
             size = (round(window.buffer.w), round(window.buffer.h))
             if cached is None or cached[0] != frame.id or bus_name in reread_bus_names \
                     or window_id in reread_windows:
+                if "popupWindow" in window.flags and (cached is None or cached[0] != frame.id):
+                    self._log(f"[popup] kwin {window.frame} ← {frame.role} {frame.name!r} "
+                              f"{frame.width}x{frame.height} ({match.rule})")
                 raw, stats = read_window(frame.accessible, frame.toolkit)
                 self._raw[window_id] = (frame.id, size, raw)
                 reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms")
@@ -222,7 +225,7 @@ class Backend:
                 self._dirty_windows.add(window_id)
                 self._schedule_update()
             raw = self._raw[window_id][2]
-            elements.extend(compose_window(raw, window_id, placement_for(scene, window, frame.toolkit), region))
+            elements.extend(compose_window(raw, window_id, placement_for(scene, window, frame.toolkit, frame.toolkit_version), region))
 
         for window_id in list(self._raw):
             if window_id not in by_id:

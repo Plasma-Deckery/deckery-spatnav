@@ -32,7 +32,7 @@ def repair_menu_layout(entries, menu_rect):
     repaired = {}
     anchors = [i for i, (rect, ok) in enumerate(entries) if ok and not rect.empty]
     if not anchors:
-        return repaired
+        return _repair_without_anchors(entries, menu_rect)
     # Menus pad their items equally on all sides; the left inset of an
     # intact item stands in for the top/bottom inset at the menu edges.
     margin = entries[anchors[0]][0].x - menu_rect.x
@@ -61,3 +61,23 @@ def repair_menu_layout(entries, menu_rect):
         for k, index in enumerate(run):
             repaired[index] = Rect(x_ref.x, top + k * height, x_ref.w, height)
     return repaired
+
+
+def _repair_without_anchors(entries, menu_rect):
+    """Every entry broken — Dolphin's hamburger "Create New" submenu: all of
+    its actions are shared with File → Create New, a menu with the same
+    actions in the same order, so the reported y/height are right and only
+    x/width belong to the other menu. Trusted only if the rects are in
+    order, don't overlap and fit inside this menu; width then comes from
+    this menu's own bounds."""
+    rects = [rect for rect, _ in entries]
+    if not rects or any(r.empty for r in rects):
+        return {}
+    for a, b in zip(rects, rects[1:]):
+        if b.y < a.y2 - 0.5:
+            return {}
+    margin = rects[0].x
+    if rects[0].y < 0 or rects[-1].y2 > menu_rect.h or 2 * margin >= menu_rect.w:
+        return {}
+    return {i: Rect(menu_rect.x + margin, menu_rect.y + r.y, menu_rect.w - 2 * margin, r.h)
+            for i, r in enumerate(rects)}

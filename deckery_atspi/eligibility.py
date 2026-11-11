@@ -4,6 +4,10 @@ Started as a copy of prototype_atspi_scan.is_relevant_element and its
 container-suppression set (the old pipeline keeps using those unchanged);
 v2-only changes are marked with the finding that motivated them."""
 
+import gi
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+
 from vendor.orca_ax.ax_object import AXObject
 from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
 
@@ -27,6 +31,13 @@ SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES = frozenset((
 ))
 
 
+def _is_enabled(node, state_set):
+    # Test desktop 2026-11-11, Flatseal (GTK4/libadwaita): GTK4 never sets
+    # ENABLED, only SENSITIVE — every GTK4 widget looked disabled.
+    return (AXUtilitiesState.is_enabled(node, state_set)
+            or state_set.contains(Atspi.StateType.SENSITIVE))
+
+
 def is_relevant_element(node, role_name=None, state_set=None):
     """FOCUSABLE+SHOWING+ENABLED, with a role-based fallback for QML/
     Kirigami list rows (not focusable there) and Firefox's named menu-bar
@@ -41,7 +52,7 @@ def is_relevant_element(node, role_name=None, state_set=None):
     if state_set is None:
         state_set = AXObject.get_state_set(node)
     is_showing = AXUtilitiesState.is_showing(node, state_set)
-    is_enabled = AXUtilitiesState.is_enabled(node, state_set)
+    is_enabled = _is_enabled(node, state_set)
     if role_name == "menu" and (AXObject.get_name(node) or ""):
         return is_enabled
     if not (is_showing and is_enabled):
@@ -64,4 +75,4 @@ def is_menu_item_candidate(node):
         return False
     if (AXObject.get_role_name(node) or "") not in MENU_ITEM_ROLES:
         return False
-    return AXUtilitiesState.is_enabled(node, AXObject.get_state_set(node))
+    return _is_enabled(node, AXObject.get_state_set(node))

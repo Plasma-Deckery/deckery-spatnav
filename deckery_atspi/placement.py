@@ -7,6 +7,11 @@ One resolver with named rules instead of the old fallback cascade
   the surface buffer's top-left. For server-side-decorated apps buffer ==
   client; for client-side-decorated ones (GTK, Gecko, Chromium) the buffer
   includes the shadow margin (deckery#28: ~26/23 px for Firefox).
+- rule "gtk4-client-origin": GTK4 anchors WINDOW coordinates at the
+  content (client) origin, not at the buffer with its CSD shadow margin —
+  measured on the test desktop 2026-11-11 with Flatseal: buffer origin put
+  every box exactly the 25.45 px shadow margin up-left. GTK3/Gecko keep
+  the buffer origin (Firefox measurement above).
 - rule "chromium-dip": Chromium's web contents report CSS/DIP pixels, i.e.
   output scale too large; its own titlebar buttons do not (deckery#28).
   Applied with the window's own output scale, no longer hardcoded 1.1."""
@@ -30,9 +35,14 @@ class Placement:
                     rect.w / scale, rect.h / scale)
 
 
-def placement_for(scene, window, toolkit):
-    dip = scene.scale_for(window) if (toolkit or "").lower() == "chromium" else 1.0
-    origin = window.buffer or window.frame
+def placement_for(scene, window, toolkit, toolkit_version=""):
+    toolkit = (toolkit or "").lower()
+    dip = scene.scale_for(window) if toolkit == "chromium" else 1.0
+    if toolkit == "gtk" and (toolkit_version or "").split(".")[0].isdigit() \
+            and int(toolkit_version.split(".")[0]) >= 4:
+        origin = window.client or window.frame
+    else:
+        origin = window.buffer or window.frame
     return Placement(origin.x, origin.y, dip)
 
 

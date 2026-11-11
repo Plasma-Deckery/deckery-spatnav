@@ -65,6 +65,10 @@ def window_frame(cls):
     raise ScenarioFailed(f"no window of class {cls}")
 
 
+def has_window(cls):
+    return any(w["cls"] == cls and w["normal"] for w in ctl.kwin_eval(ctl._WINDOWS_JS))
+
+
 def window_id(cls):
     for w in reversed(ctl.kwin_eval(ctl._WINDOWS_JS)):
         if w["cls"] == cls and w["normal"]:
@@ -212,6 +216,43 @@ def scenario_menu():
     return f"{len(menu_items)} menu items"
 
 
+def scenario_submenu():
+    """Dolphin's hamburger menu and its submenu (Create New) open at once:
+    both popups' items are targets, the submenu covers its parent's items
+    where it overlaps; Escape twice closes both. (Dolphin hides its menu
+    bar by default.)"""
+    ctl.kwin_raise("org.kde.dolphin")
+    ctl.kwin_move("org.kde.dolphin", 100, 60, 800, 600)
+    _, before = settle()
+    button = next((e for e in before if e["name"] == "Open Menu"), None)
+    expect(button, "no 'Open Menu' target in dolphin")
+    eis("click", *button["target"])
+    _, items = settle(timeout_s=6)
+    create = next((e for e in items if e["name"] == "Create New"), None)
+    expect(create, f"'Create New' not a target after opening the menu "
+                   f"(menu items: {[e['name'] for e in items if 'menu item' in e['role']][:8]})")
+    eis("click", *create["target"])
+    time.sleep(1.0)
+    _, items = settle(timeout_s=6)
+    screenshot("submenu-open")
+    popups = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["popup"]]
+    expect(len(popups) >= 2, f"expected File menu + submenu popups, KWin has {len(popups)}")
+    by_window = {}
+    for e in items:
+        if "menu item" in e["role"]:
+            by_window.setdefault(e["window"], []).append(e["name"])
+    popup_ids = [p["id"] for p in popups]
+    expect(all(p in by_window for p in popup_ids),
+           f"popups without menu-item targets: {[p for p in popup_ids if p not in by_window]}")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"with submenu open: {failures[:3]}")
+    eis("key", "esc", "esc")
+    _, items = settle(timeout_s=6)
+    left = [e for e in items if e["window"] in popup_ids]
+    expect(not left, f"{len(left)} targets of closed menus remain")
+    return f"{len(popups)} popups, items per popup {[len(v) for v in by_window.values()]}"
+
+
 def scenario_desktops():
     """Window on another virtual desktop is not a target; switching shows it."""
     ctl.kwin_eval("(function(){ if (workspace.desktops.length < 2) "
@@ -237,6 +278,88 @@ def scenario_desktops():
     return f"{len(items2)} targets on desktop 2"
 
 
+def outputs():
+    return ctl.kwin_eval("(function(){var o=[];var s=workspace.screens;for(var i=0;i<s.length;i++)"
+                         "o.push({name:s[i].name,geo:[s[i].geometry.x,s[i].geometry.y,"
+                         "s[i].geometry.width,s[i].geometry.height],scale:s[i].devicePixelRatio});"
+                         "return o;})()")
+
+
+def set_scale(output, scale):
+    subprocess.run(["distrobox-host-exec", os.path.join(REPO, "tools/testdesk/run.sh"),
+                    "kscreen-doctor", f"output.{output}.scale.{scale}"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    time.sleep(1.0)
+
+
+def scenario_multimonitor():
+    """Needs TESTDESK_OUTPUTS=2. Window on the second output, a window
+    spanning both (parts in the gap between outputs dropped), then the
+    second output at a different scale."""
+    outs = outputs()
+    if len(outs) < 2:
+        return "skipped (single output)"
+    second = Rect(*outs[1]["geo"])
+    dolphin_id = window_id("org.kde.dolphin")
+    ctl.kwin_move("org.kde.dolphin", second.x + 100, 40, 700, 600)
+    ctl.kwin_raise("org.kde.dolphin")
+    _, items = settle()
+    screenshot("multimon-second")
+    mine = [e for e in items if e["window"] == dolphin_id]
+    expect(mine, "dolphin on the second output has no targets")
+    outside = [e for e in mine if any(not Rect(*p).intersect(second) for p in e["visible"])]
+    expect(not outside, f"{len(outside)} dolphin targets not on the second output")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"on second output: {failures[:3]}")
+
+    first = Rect(*outs[0]["geo"])
+    ctl.kwin_move("org.kde.dolphin", first.x2 - 350, 40, 700, 600)
+    _, items = settle()
+    screenshot("multimon-spanning")
+    mine = [e for e in items if e["window"] == dolphin_id]
+    on = {i for i, o in enumerate(outs) for e in mine for p in e["visible"]
+          if Rect(*p).intersect(Rect(*o["geo"]))}
+    expect(on == {0, 1}, f"spanning window has targets on outputs {sorted(on)}, expected both")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"spanning: {failures[:3]}")
+
+    set_scale(outs[1]["name"], "1")
+    outs = outputs()
+    second = Rect(*outs[1]["geo"])
+    ctl.kwin_move("org.kde.dolphin", second.x + 100, 40, 700, 600)
+    _, items = settle()
+    screenshot("multimon-mixed-scale")
+    failures = ctl.check(verbose=False)
+    set_scale(outs[1]["name"], "1.1")
+    expect(not failures, f"mixed scales ({outs[0]['scale']}/{outs[1]['scale']}): {failures[:3]}")
+    return f"{len(mine)} targets spanning, scales {outs[0]['scale']}/{outs[1]['scale']}"
+
+
+def scenario_coverage():
+    """Every visible normal window has targets (i.e. was matched to its
+    AT-SPI frame and read) — catches matching gaps such as Flatpak's proxy
+    pid, and whole toolkits being filtered out (GTK4 without ENABLED)."""
+    _, items = settle()
+    with_targets = {e["window"] for e in items}
+    windows = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS)
+               if w["normal"] and not w["minimized"] and w["cls"] != "python3.14"]
+    # fully covered windows legitimately have none
+    regions = {}
+    from deckery_atspi.scene import scene_from_payload
+    missing = []
+    for w in windows:
+        frame = Rect(*w["frame"])
+        above = [Rect(*o["frame"]) for o in windows[windows.index(w) + 1:]]
+        from deckery_atspi.geometry import region_subtract
+        region = [frame]
+        for a in above:
+            region = region_subtract(region, a)
+        if region and w["id"] not in with_targets:
+            missing.append(f"{w['cls']} {w['caption'][:30]!r}")
+    expect(not missing, f"visible windows without targets: {missing}")
+    return f"{len(windows)} windows covered"
+
+
 def scenario_invariants():
     failures = ctl.check(verbose=False)
     expect(not failures, "; ".join(failures[:5]))
@@ -248,7 +371,10 @@ SCENARIOS = {
     "move": scenario_move,
     "scroll": scenario_scroll,
     "menu": scenario_menu,
+    "submenu": scenario_submenu,
     "desktops": scenario_desktops,
+    "multimonitor": scenario_multimonitor,
+    "coverage": scenario_coverage,
     "invariants": scenario_invariants,
 }
 

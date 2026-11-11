@@ -22,6 +22,7 @@ class FrameInfo:
     app_name: str
     pid: int
     toolkit: str
+    toolkit_version: str
     role: str
     name: str
     width: int
@@ -37,6 +38,13 @@ class FrameInfo:
 POPUP_ROLES = frozenset(("popup menu", "menu", "window"))
 
 
+def _toolkit_version(app):
+    try:
+        return app.get_toolkit_version() or ""
+    except Exception:
+        return ""
+
+
 def frame_info(acc):
     """FrameInfo for a single top-level accessible — used for popups, which
     Qt does not list as children of their application (Dolphin's context
@@ -47,7 +55,8 @@ def frame_info(acc):
     states = acc.get_state_set()
     return FrameInfo(
         id=element_id(acc), app_name=AXObject.get_name(app) or "", pid=app.get_process_id(),
-        toolkit=AXObject.get_toolkit_name(app) or "", role=AXObject.get_role_name(acc) or "",
+        toolkit=AXObject.get_toolkit_name(app) or "", toolkit_version=_toolkit_version(app),
+        role=AXObject.get_role_name(acc) or "",
         name=AXObject.get_name(acc) or "", width=ext.width, height=ext.height,
         showing=states.contains(Atspi.StateType.SHOWING),
         active=states.contains(Atspi.StateType.ACTIVE), accessible=acc)
@@ -63,6 +72,7 @@ def list_frames():
             continue
         app_name = AXObject.get_name(app) or ""
         toolkit = AXObject.get_toolkit_name(app) or ""
+        toolkit_version = _toolkit_version(app)
         for frame in AXObject.iter_children(app):
             try:
                 ext = frame.get_extents(Atspi.CoordType.WINDOW)
@@ -71,6 +81,7 @@ def list_frames():
                 continue
             frames.append(FrameInfo(
                 id=element_id(frame), app_name=app_name, pid=pid, toolkit=toolkit,
+                toolkit_version=toolkit_version,
                 role=AXObject.get_role_name(frame) or "", name=AXObject.get_name(frame) or "",
                 width=ext.width, height=ext.height,
                 showing=states.contains(Atspi.StateType.SHOWING),

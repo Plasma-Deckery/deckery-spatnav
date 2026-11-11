@@ -269,6 +269,14 @@ def live_rects():
         try:
             e = node.get_extents(Atspi.CoordType.WINDOW)
             out[element_id(node)] = (e.x, e.y, e.width, e.height)
+            if node.get_role_name() in ("menu item", "check menu item", "radio menu item") and \
+                    not node.get_state_set().contains(Atspi.StateType.SHOWING):
+                # Qt reports shared menu actions with another menu's
+                # geometry (deckery_atspi/menu_repair.py): no ground truth.
+                out[element_id(node)] = None
+        except Exception:
+            pass  # e.g. GTK4 application roots have no Component
+        try:
             for i in range(node.get_child_count()):
                 child = node.get_child_at_index(i)
                 if child is not None:
@@ -289,14 +297,18 @@ def stale_targets(items, tolerance=1.0):
     (no Chromium windows here, so no DIP scaling to account for)."""
     from collections import Counter
     live = live_rects()
+    popup_windows = {w["id"] for w in kwin_eval(_WINDOWS_JS) if w["popup"]}
     by_window = {}
     gone = []
     for e in items:
         if e.get("inferred"):
             continue  # menu_repair geometry: AT-SPI's own rect is known-wrong
-        r = live.get(e["id"])
+        if e["id"] not in live:
+            if e["window"] not in popup_windows:  # Qt popups are orphans in the tree
+                gone.append(e)
+            continue
+        r = live[e["id"]]
         if r is None:
-            gone.append(e)
             continue
         delta = (round(e["rect"][0] - r[0]), round(e["rect"][1] - r[1]))
         size_ok = abs(e["rect"][2] - r[2]) <= tolerance and abs(e["rect"][3] - r[3]) <= tolerance
@@ -325,8 +337,8 @@ def check(verbose=True):
     for e in items:
         for part in e["visible"]:
             r = Rect(*part)
-            if not any(r.intersect(s) for s in screen_rects):
-                failures.append(f"off-screen part: {e['role']} {e['name']!r} {part}")
+            if not any((r.intersect(s) or Rect(0, 0, 0, 0)).area >= r.area - 1 for s in screen_rects):
+                failures.append(f"part not within one output: {e['role']} {e['name']!r} {part}")
         tx, ty = e["target"]
         if not any(part[0] - 0.01 <= tx <= part[0] + part[2] + 0.01 and
                    part[1] - 0.01 <= ty <= part[1] + part[3] + 0.01 for part in e["visible"]):
@@ -351,6 +363,19 @@ def check(verbose=True):
                 cut = r.intersect(a)
                 if cut is not None and cut.area > 1:
                     failures.append(f"part under higher window: {e['role']} {e['name']!r} {part}")
+    # Nested duplicates: an unnamed target inside a same-role target of the
+    # same window is the same control twice.
+    for inner in items:
+        if inner["name"]:
+            continue
+        ri = Rect(*inner["rect"])
+        for outer in items:
+            if outer is inner or outer["role"] != inner["role"] or outer["window"] != inner["window"]:
+                continue
+            cut = ri.intersect(Rect(*outer["rect"]))
+            if cut is not None and cut.area >= ri.area - 1 and Rect(*outer["rect"]).area > ri.area:
+                failures.append(f"nested duplicate: unnamed {inner['role']} inside {outer['name']!r}")
+                break
     for e in stale_targets(items):
         failures.append(f"stale: {e['role']} {e['name']!r} published at {[round(c) for c in e['rect']]}")
     if verbose:

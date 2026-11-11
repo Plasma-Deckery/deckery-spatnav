@@ -58,6 +58,15 @@ class DolphinContextMenuTest(unittest.TestCase):
         entries = [(R(4, 4, 300, 30), True), (R(4, 0, 300, 30), False), (R(4, 124, 300, 30), True)]
         self.assertEqual(repair_menu_layout(entries, R(0, 0, 308, 158)), {})
 
+    def test_all_broken_but_consistent_keeps_rows_takes_width_from_menu(self):
+        entries = [(R(4, 4, 281, 30), False), (R(4, 34, 281, 5), False), (R(4, 39, 281, 30), False)]
+        repaired = repair_menu_layout(entries, R(0, 0, 320, 318))
+        self.assertEqual(repaired[2], R(4, 39, 312, 30))
+
+    def test_all_broken_overlapping_is_not_guessed(self):
+        entries = [(R(4, 64, 281, 30), False), (R(4, 34, 281, 30), False)]
+        self.assertEqual(repair_menu_layout(entries, R(0, 0, 320, 318)), {})
+
     def test_intact_entries_untouched(self):
         self.assertTrue(all(DOLPHIN[i][1] for i in range(len(DOLPHIN)) if i not in self.repaired))
 
