@@ -43,7 +43,10 @@ for _row, _start in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)):
     for _i, _c in enumerate(_row):
         KEYS[_c] = _start + _i
 
-_lib = ctypes.CDLL(ctypes.util.find_library("ei") or "libei.so.1")
+# The deckery distrobox has no libei; the host's only needs libc.
+_HOST_LIBEI = "/run/host/usr/lib64/libei.so.1"
+_lib = ctypes.CDLL(ctypes.util.find_library("ei")
+                   or (_HOST_LIBEI if os.path.exists(_HOST_LIBEI) else "libei.so.1"))
 _p = ctypes.c_void_p
 for name, res, args in (
     ("ei_new_sender", _p, [_p]),

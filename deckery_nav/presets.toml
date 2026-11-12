@@ -1,0 +1,98 @@
+# Navigation prototype presets — nothing here is decided, everything is
+# meant to be compared. The file is re-read on save while the prototype runs.
+#
+# Two inputs at once, independent of each other:
+#   left stick  → [relative.*]  jump from target to target ("Sprung")
+#   left pad    → [absolute.*]  pad = screen, feel the targets ("Tastkarte")
+# Switch with: python3 -m deckery_nav.ctl next relative|absolute
+#              python3 -m deckery_nav.ctl set relative <name>
+# The first entry of each table is the start preset.
+
+[general]
+min_size = 6          # px: visible parts smaller than this on both sides are no targets
+show_all = false      # faint outlines of all targets (the v2 viewer already draws them)
+
+# ── left stick: relative ──────────────────────────────────────────────────
+# scorer: kante (rows/columns first, like browser spatial navigation)
+#         kegel (nearest centre inside a cone around the stick direction)
+#         strahl (first target a beam from the current one hits)
+# directions: 4, 8, or 0 = the stick's exact angle
+
+[relative.kante-8]
+label = "Kante, 8 Richtungen"
+scorer = "kante"
+directions = 8
+
+[relative.kante-4]
+label = "Kante, 4 Richtungen (wie Pfeiltasten)"
+scorer = "kante"
+directions = 4
+
+[relative.kegel-frei]
+label = "Kegel 45°, freier Winkel"
+scorer = "kegel"
+directions = 0
+cone_deg = 45
+
+[relative.strahl-frei]
+label = "Strahl 24 px, freier Winkel"
+scorer = "strahl"
+directions = 0
+beam_px = 24
+
+[relative.kante-einzeln]
+label = "Kante, 8 Richtungen, ohne Wiederholung"
+scorer = "kante"
+directions = 8
+repeat_interval = 0
+
+# stick timing (any relative preset may override):
+#   on = 0.55, off = 0.35         deflection to fire / to re-arm
+#   repeat_delay = 0.40           s before a held stick repeats
+#   repeat_interval = 0.15        s between repeats (0 = none)
+#   retrigger_deg = 50            turning the held stick this far = new push
+#   pointer = "ziel" | "aus"      jump the real pointer, or only highlight
+
+# ── left pad: absolute ────────────────────────────────────────────────────
+# area: bildschirm (all monitors) | monitor (the selection's) |
+#       ziele (box around all targets) | fenster (box around the selection's
+#       window's targets, fixed at touch-down)
+# pointer: ziel (jumps to the selected target) | finger (follows the finger,
+#          selection only highlighted) | aus
+
+[absolute.bildschirm]
+label = "Ganzer Bildschirm, Zeiger springt aufs Ziel"
+area = "bildschirm"
+pointer = "ziel"
+
+[absolute.bildschirm-finger]
+label = "Ganzer Bildschirm, Zeiger folgt dem Finger"
+area = "bildschirm"
+pointer = "finger"
+
+[absolute.fenster]
+label = "Nur das Fenster der Auswahl"
+area = "fenster"
+pointer = "ziel"
+
+[absolute.zaeh]
+label = "Zäh: große Hysterese, 80 ms Verweilen, geglättet"
+area = "bildschirm"
+pointer = "ziel"
+keep_px = 25
+dwell_ms = 80
+smoothing = 0.5
+
+[absolute.immer-einrasten]
+label = "Rastet immer ein, auch weit weg vom Ziel"
+area = "bildschirm"
+pointer = "ziel"
+snap_px = 100000
+
+# pad parameters (any absolute preset may override):
+#   edge = 0.08       pad border per side that counts as the area's edge
+#   invert_y = false  makima: pad y up = positive
+#   snap_px = 80      farther from every target: nothing selected
+#   keep_px = 10      current selection holds while the finger is this close
+#   dwell_ms = 0      a new candidate must stay best this long
+#   smoothing = 0     low-pass on the finger point (0 = raw, 0.8 = heavy)
