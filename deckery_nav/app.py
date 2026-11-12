@@ -126,6 +126,7 @@ class NavApp(Gtk.Application):
         Gio.bus_own_name_on_connection(bus, NAV_NAME, Gio.BusNameOwnerFlags.REPLACE, None, None)
         GLib.timeout_add(1000 // INPUT_HZ, self._on_tick)
         GLib.timeout_add(500, self._check_presets_file)
+        GLib.timeout_add(250, self._service_pointer)
         for sig in (signal.SIGINT, signal.SIGTERM):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, self._quit)
         self.hold()
@@ -173,6 +174,14 @@ class NavApp(Gtk.Application):
                     self.pointer_error = str(e)
             if fresh or warp is not None or had_aim != (self.nav.aim is not None):
                 self._redraw()
+        return GLib.SOURCE_CONTINUE
+
+    def _service_pointer(self):
+        if self.pointer is not None:
+            try:
+                self.pointer.service()
+            except Exception as e:     # noqa: BLE001
+                self.pointer_error = str(e)
         return GLib.SOURCE_CONTINUE
 
     def _check_presets_file(self):

@@ -15,7 +15,11 @@ from .targets import bounding_box, contains, nearest, target_distance
 @dataclass(frozen=True)
 class AbsoluteParams:
     area: str = "bildschirm"   # bildschirm | monitor | ziele | fenster
-    edge: float = 0.08         # pad border (fraction per side) that is all "edge of the area"
+    edge: float = 0.05         # pad border (fraction per side) that is all "edge of the area"
+    edge_left: float = -1.0    # per-side overrides (< 0 = use edge); the thumb's contact
+    edge_right: float = -1.0   # point reaches some pad edges less far than others —
+    edge_top: float = -1.0     # measure with python3 -m deckery_nav.padrange
+    edge_bottom: float = -1.0
     invert_y: bool = False     # makima reports pad y up = positive; True flips that
     snap_px: float = 80.0      # finger farther than this from every target: nothing selected
     keep_px: float = 10.0      # current selection holds while the finger is this close to it
@@ -28,11 +32,27 @@ def pad_to_area(px, py, area, params=AbsoluteParams()):
     """Pad coordinates (-1..1, y up unless invert_y) → point in `area` (Rect)."""
     u = (px + 1.0) / 2.0
     v = (1.0 - py) / 2.0 if not params.invert_y else (py + 1.0) / 2.0
-    e = params.edge
-    span = max(1e-6, 1.0 - 2.0 * e)
-    u = min(1.0, max(0.0, (u - e) / span))
-    v = min(1.0, max(0.0, (v - e) / span))
+    left, right, top, bottom = edges(params)
+    u = min(1.0, max(0.0, (u - left) / max(1e-6, 1.0 - left - right)))
+    v = min(1.0, max(0.0, (v - top) / max(1e-6, 1.0 - top - bottom)))
     return area.x + u * area.w, area.y + v * area.h
+
+
+def edges(params):
+    """(left, right, top, bottom) dead borders as fractions of the pad, in
+    screen orientation."""
+    return tuple(e if e >= 0 else params.edge
+                 for e in (params.edge_left, params.edge_right, params.edge_top, params.edge_bottom))
+
+
+def edges_from_range(x_min, x_max, y_min, y_max, tolerance=0.03):
+    """Measured pad extremes (makima units, y up) → per-side borders so the
+    farthest reachable point plus `tolerance` already hits the screen edge."""
+    left = (x_min + 1.0) / 2.0 + tolerance
+    right = (1.0 - x_max) / 2.0 + tolerance
+    top = (1.0 - y_max) / 2.0 + tolerance
+    bottom = (y_min + 1.0) / 2.0 + tolerance
+    return tuple(round(max(0.0, e), 3) for e in (left, right, top, bottom))
 
 
 def choose_area(kind, monitors, targets, selection):

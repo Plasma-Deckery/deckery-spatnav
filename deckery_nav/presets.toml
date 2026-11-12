@@ -12,6 +12,19 @@
 min_size = 6          # px: visible parts smaller than this on both sides are no targets
 show_all = false      # faint outlines of all targets (the v2 viewer already draws them)
 
+# ── left pad calibration (applies to every [absolute.*], which may override)
+# Dead border per pad side, as a fraction of the pad: touching there already
+# counts as the screen edge. Per side because the thumb's contact point does
+# not reach every pad edge equally far. Measure your own with
+#   python3 -m deckery_nav.padrange
+# (rub along all four pad edges) and paste what it prints here.
+[pad]
+edge = 0.05
+# edge_left = 0.05
+# edge_right = 0.05
+# edge_top = 0.05
+# edge_bottom = 0.05
+
 # ── left stick: relative ──────────────────────────────────────────────────
 # scorer: kante (rows/columns first, like browser spatial navigation)
 #         kegel (nearest centre inside a cone around the stick direction)
@@ -90,7 +103,7 @@ pointer = "ziel"
 snap_px = 100000
 
 # pad parameters (any absolute preset may override):
-#   edge = 0.08       pad border per side that counts as the area's edge
+#   edge, edge_left … edge_bottom   see [pad] above
 #   invert_y = false  makima: pad y up = positive
 #   snap_px = 80      farther from every target: nothing selected
 #   keep_px = 10      current selection holds while the finger is this close

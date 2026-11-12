@@ -53,8 +53,9 @@ def parse_presets(data):
         RelativePreset(name, t.get("label", name), _pick(DirectionParams, t), _pick(StickParams, t),
                        t.get("pointer", "ziel"))
         for name, t in data.get("relative", {}).items())
+    pad = data.get("pad", {})     # physical calibration, shared by every absolute preset
     absolute = tuple(
-        AbsolutePreset(name, t.get("label", name), _pick(AbsoluteParams, t))
+        AbsolutePreset(name, t.get("label", name), _pick(AbsoluteParams, {**pad, **t}))
         for name, t in data.get("absolute", {}).items())
     if not relative or not absolute:
         raise ValueError("presets need at least one [relative.*] and one [absolute.*]")

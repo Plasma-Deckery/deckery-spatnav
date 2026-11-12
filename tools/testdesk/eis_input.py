@@ -124,6 +124,14 @@ class EisInput:
                     ctypes.c_int(CAP_POINTER), _p(None))
             elif etype == EV_DEVICE_ADDED:
                 self.devices.append(_lib.ei_device_ref(_lib.ei_event_get_device(event)))
+            elif etype == EV_DEVICE_REMOVED:
+                # KWin replaces the absolute device now and then (seen on
+                # the real desktop every few seconds); emulating on the old
+                # one only logs "device is not emulating".
+                device = _lib.ei_event_get_device(event)
+                self._resumed.discard(device)
+                if device in self.devices:
+                    self.devices.remove(device)
             elif etype == EV_DEVICE_RESUMED:
                 self._resumed.add(_lib.ei_event_get_device(event))
             elif etype == EV_DEVICE_PAUSED:

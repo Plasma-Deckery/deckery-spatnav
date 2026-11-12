@@ -33,6 +33,7 @@ class Nav:
         self.finger_point = None
         self.aim = None
         self.jumps = 0
+        self.pad_range = None           # [x_min, x_max, y_min, y_max] seen while touching
         self._apply_presets()
 
     # ── presets ──────────────────────────────────────────────────────────
@@ -115,6 +116,8 @@ class Nav:
                 self.picker.lift()
                 self.finger_point = None
             return None
+        r = self.pad_range or [pad.x, pad.x, pad.y, pad.y]
+        self.pad_range = [min(r[0], pad.x), max(r[1], pad.x), min(r[2], pad.y), max(r[3], pad.y)]
         if not self.touching:
             self.touching = True
             self.area = choose_area(params.area, self.monitors, self.targets, self.selection)
@@ -166,4 +169,4 @@ class Nav:
                                                      "point": list(s.point)},
                 "targets": len(self.targets), "touching": self.touching,
                 "finger": list(self.finger_point) if self.finger_point else None,
-                "jumps": self.jumps}
+                "jumps": self.jumps, "pad_range": self.pad_range}

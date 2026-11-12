@@ -18,8 +18,8 @@ class Pointer:
     def warp(self, x, y):
         if self.last == (x, y):
             return
-        self.last = (x, y)
         lib = eis_input._lib
+        self._eis._pump(0)   # KWin swaps the absolute device now and then: be current
         try:
             device = self._eis._device(eis_input.CAP_POINTER_ABSOLUTE)
         except RuntimeError:
@@ -30,4 +30,9 @@ class Pointer:
         lib.ei_device_pointer_motion_absolute(device, float(x), float(y))
         lib.ei_device_frame(device, lib.ei_now(self._eis._ei))
         lib.ei_device_stop_emulating(device)
+        self.last = (x, y)
         self._eis._pump(0)   # flush without the 30 ms wait EisInput._emit does
+
+    def service(self):
+        """Process EIS events (device swaps, pings) while idle."""
+        self._eis._pump(0)

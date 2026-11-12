@@ -2,7 +2,8 @@ import math
 import unittest
 
 from deckery_atspi.geometry import Rect
-from deckery_nav.absolute import AbsoluteParams, AbsolutePicker, choose_area, pad_to_area
+from deckery_nav.absolute import (AbsoluteParams, AbsolutePicker, choose_area, edges_from_range,
+                                   pad_to_area)
 from deckery_nav.direction import DirectionParams, pick, quantize
 from deckery_nav.makima_input import ExportKeeper, InputSnapshot, parse_state
 from deckery_nav.presets import DEFAULT_PATH, load_presets, parse_presets
@@ -141,6 +142,28 @@ class AbsoluteTest(unittest.TestCase):
         self.assertEqual(pad_to_area(-0.9, 0.9, area, p), (0, 0))
         self.assertEqual(pad_to_area(-1, 1, area, p), (0, 0))
         self.assertAlmostEqual(pad_to_area(0, 0, area, p)[0], 50)
+
+    def test_per_side_edges(self):
+        area = Rect(0, 0, 100, 100)
+        p = AbsoluteParams(edge=0.0, edge_right=0.2)
+        self.assertEqual(pad_to_area(0.6, 0, area, p)[0], 100)        # u = 0.8 is already the right edge
+        self.assertEqual(pad_to_area(-1, 0, area, p)[0], 0)
+        self.assertAlmostEqual(pad_to_area(-0.2, 0, area, p)[0], 50)  # u = 0.4 → middle of 0..0.8
+
+    def test_edges_from_measured_range(self):
+        # Thumb reaches x -1 … 0.8, y -0.9 … 1.
+        left, right, top, bottom = edges_from_range(-1.0, 0.8, -0.9, 1.0, tolerance=0.0)
+        self.assertEqual((left, right, top, bottom), (0.0, 0.1, 0.0, 0.05))
+        p = AbsoluteParams(edge_left=left, edge_right=right, edge_top=top, edge_bottom=bottom)
+        self.assertEqual(pad_to_area(0.8, -0.9, Rect(0, 0, 100, 100), p), (100, 100))
+
+    def test_pad_section_is_shared_by_absolute_presets(self):
+        p = parse_presets({"pad": {"edge_right": 0.12, "edge": 0.02},
+                           "relative": {"x": {}},
+                           "absolute": {"a": {}, "b": {"edge": 0.07}}})
+        self.assertEqual(p.find("absolute", "a").params.edge_right, 0.12)
+        self.assertEqual(p.find("absolute", "a").params.edge, 0.02)
+        self.assertEqual(p.find("absolute", "b").params.edge, 0.07)
 
     def test_picker_selects_under_and_near_the_finger(self):
         picker = AbsolutePicker(AbsoluteParams(snap_px=20, keep_px=0))
@@ -282,7 +305,7 @@ class NavTest(unittest.TestCase):
         from deckery_nav.makima_input import Pad
         nav = self.nav
         nav.select_preset("absolute", name="bildschirm")
-        # Pad top-left area → a (edge 0.08 maps the border to the screen edge).
+        # Pad top-left area → a (edge 0.05 maps the border to the screen edge).
         warp = nav.on_input(self.snap(pad=Pad(-0.45, 0.45, True)), 0.0)
         self.assertEqual(nav.selection.id, "a")
         self.assertEqual(warp, (130, 115))
