@@ -23,7 +23,7 @@ from gi.repository import Gio, GLib, Gtk
 APP_ID = "org.deckery.TestApp"
 
 LIST_ROWS = 40
-TREE_FOLDERS = 15
+TREE_FOLDERS = 30
 TREE_CHILDREN = 5
 SCROLL_AREA_ROWS = 24
 
