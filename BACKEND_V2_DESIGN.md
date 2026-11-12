@@ -247,6 +247,24 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
   Fensterliste — das Backend stand so lange still (2–4 s nachhängende
   Umrisse). Jetzt: alle Anwendungen parallel mit 500 ms anfragen, stumme
   30 s auslassen und mit ihren bisherigen Frames behalten.
+- **Stumm, aber weiter gelesen (echter Desktop, 2026-11-12, hohe Last):**
+  plasmashell verpasste den Ping, seine Frames blieben (s.o.), also blieben
+  die Panels zugeordnet — und wurden bei jedem Event trotzdem neu gelesen,
+  jedes Fenster mit drei 3-s-Timeouts: 45 s pro Update, drei hintereinander,
+  das Backend stand 2,5 min, die Umrisse des Auto-Hide-Panels (links,
+  „Menü von der Seite“) blieben stehen. Dazu galt ein nur kurz beschäftigtes
+  plasmashell 30 s als stumm: neue Popups (Kickoff) so lange ohne Ziele
+  (Test-Desktop: Panel nach dem Start 45 s leer). Jetzt: Fenster stummer
+  Apps werden nicht gelesen (letzte Ziele bleiben, KWin verschiebt, verdeckt
+  und versteckt sie weiter); ein Timeout beim Lesen oder im Poll des
+  aktiven Fensters markiert die App sofort und bricht den Lesevorgang ab
+  (`Batch.timed_out`, keine weiteren Aufrufe); ein nicht blockierender Ping
+  (2 s, nach Timeout alle 1 s erneut) hebt die Markierung auf, sobald sie
+  antwortet → neu listen und lesen. Szenario `hung` (Dolphin per SIGSTOP):
+  vorher antwortete das Backend > 3 s nicht, jetzt Get ≤ 15 ms, ein
+  verschobenes Nachbarfenster folgt nach 0,3 s, nach SIGCONT ist Dolphin
+  nach ~3 s wieder gelesen. Auto-Hide-Panels selbst: KWin meldet sie
+  versteckt (`hidden`), das war schon richtig.
 - **KWins eigenes Fenstermenü** (Fenster-Icon, Alt+F3): ein KWin-internes
   Fenster ohne AT-SPI-Inhalt — die KWin-Anwendung hat keine Kinder und
   sendet keine Events. Nicht lesbar.

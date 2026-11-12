@@ -209,6 +209,7 @@ class FakeBatch:
     def __init__(self, bus):
         self.bus = bus
         self.calls = 0
+        self.timed_out = False
         self.queue = deque()
 
     def __enter__(self):
@@ -220,6 +221,8 @@ class FakeBatch:
     def call(self, dest, path, iface, method, args, on_reply):
         self.calls += 1
         self.bus.log.append((path, method if method != "Get" else args.unpack()[1]))
+        if path in self.bus.hung:
+            self.timed_out = True
         self.queue.append((on_reply, self.bus.reply(path, iface, method, args)))
 
     def run(self):
@@ -231,10 +234,11 @@ class FakeBatch:
 
 
 class FakeBus:
-    def __init__(self, root, broken=()):
+    def __init__(self, root, broken=(), hung=()):
         self.nodes = {}
         self.log = []
-        self.broken = set(broken)
+        self.broken = set(broken) | set(hung)
+        self.hung = set(hung)  # these time out (atspi_bus.Batch.timed_out)
         self._index(root)
 
     def _index(self, node):
@@ -337,6 +341,16 @@ class FetchTest(unittest.TestCase):
         frame = SimpleNamespace(app=SimpleNamespace(bus_name=":1.9"), path="/0")
         out = select_targets(fetch_tree(bus, frame, False, stats), False, stats)
         self.assertEqual(ids(out), ["2"])
+        self.assertFalse(stats.timed_out)
+
+    def test_timeout_is_reported(self):
+        # The backend must tell a hung app from an empty window.
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.PUSH_BUTTON, TARGET, (0, 0, 20, 20), "OK")])
+        stats = ReadStats()
+        frame = SimpleNamespace(app=SimpleNamespace(bus_name=":1.9"), path="/0")
+        fetch_tree(FakeBus(root, hung={"/0"}), frame, False, stats)
+        self.assertTrue(stats.timed_out)
 
 
 if __name__ == "__main__":

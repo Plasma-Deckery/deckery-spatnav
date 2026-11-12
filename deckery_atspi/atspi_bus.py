@@ -83,6 +83,20 @@ class AtspiBus:
         except GLib.Error:
             return None
 
+    def ping(self, dest, path, timeout_ms, on_done):
+        """Asks dest for a child count without blocking: the reply comes
+        on the caller's thread-default main context. on_done(True) once
+        dest answers (or is gone for good), on_done(False) on a timeout."""
+        def done(connection, result):
+            try:
+                connection.call_finish(result)
+                answered = True
+            except GLib.Error as error:
+                answered = not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT)
+            on_done(answered)
+        self._connect().call(dest, path, PROPERTIES, "Get", GLib.Variant("(ss)", (ACCESSIBLE, "ChildCount")),
+                             None, Gio.DBusCallFlags.NO_AUTO_START, timeout_ms, None, done)
+
 
 class Batch:
     """Calls issued via call() may be answered in any order; their
@@ -95,6 +109,11 @@ class Batch:
         self._pending = 0
         self.calls = 0
         self.errors = 0
+        # Set by the first reply that timed out: the app is hung (or busy
+        # far beyond CALL_TIMEOUT_MS), every further call would only wait
+        # out its own timeout — real desktop 2026-11-12: a hung plasmashell
+        # cost three of them per window read, 9 s each.
+        self.timed_out = False
         self._pushed = False
 
     def __enter__(self):
@@ -110,7 +129,12 @@ class Batch:
 
     def call(self, dest, path, iface, method, args, on_reply, timeout_ms=CALL_TIMEOUT_MS):
         """on_reply(unpacked reply tuple), or on_reply(None) on any D-Bus
-        error (object gone, interface not implemented, timeout)."""
+        error (object gone, interface not implemented, timeout). After a
+        timeout, on_reply(None) right away without asking."""
+        if self.timed_out:
+            self.errors += 1
+            on_reply(None)
+            return
         self._pending += 1
         self.calls += 1
         self._connection.call(dest, path, iface, method, args, None, Gio.DBusCallFlags.NO_AUTO_START,
@@ -120,8 +144,10 @@ class Batch:
         self._pending -= 1
         try:
             value = connection.call_finish(result).unpack()
-        except GLib.Error:
+        except GLib.Error as error:
             self.errors += 1
+            if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT):
+                self.timed_out = True
             value = None
         try:
             on_reply(value)
