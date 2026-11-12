@@ -1,7 +1,9 @@
 import unittest
 
+from deckery_atspi.compose import compose_window
 from deckery_atspi.geometry import Rect
 from deckery_atspi.placement import placement_for
+from deckery_atspi.reader import RawElement
 from deckery_atspi.scene import scene_from_payload
 
 
@@ -35,11 +37,23 @@ class PlacementTest(unittest.TestCase):
             p = placement_for(scene, scene.windows[0], toolkit, version)
             self.assertAlmostEqual(p.to_screen(Rect(30, 30, 10, 10)).x, 4.55)
 
-    def test_chromium_contents_divided_by_output_scale_but_not_titlebar_buttons(self):
+    def test_chromium_web_content_divided_by_output_scale_but_not_its_own_ui(self):
         scene = scene_with(dict(GTK4_CSD, buffer={"x": 10, "y": 20, "w": 700, "h": 650}))
         p = placement_for(scene, scene.windows[0], "Chromium")
-        self.assertRect(p.to_screen(Rect(110, 220, 11, 11), "Send"), Rect(110, 220, 10, 10))
-        self.assertRect(p.to_screen(Rect(110, 220, 11, 11), "Close"), Rect(120, 240, 11, 11))
+        self.assertRect(p.to_screen(Rect(110, 220, 11, 11), web=True), Rect(110, 220, 10, 10))
+        self.assertRect(p.to_screen(Rect(110, 220, 11, 11)), Rect(120, 240, 11, 11))
+
+    def test_compose_scales_only_the_web_part_of_the_clip_chain(self):
+        # A link in a scrolled list inside the page, inside a native clip.
+        scene = scene_with(dict(GTK4_CSD, buffer={"x": 0, "y": 0, "w": 700, "h": 650}))
+        p = placement_for(scene, scene.windows[0], "Chromium")
+        native, document, web_list = Rect(0, 0, 700, 650), Rect(0, 110, 660, 550), Rect(22, 165, 330, 110)
+        raw = RawElement("id", "link", "Eintrag", Rect(22, 253, 330, 33), (native, document, web_list),
+                         web=True, web_clips=2)
+        [element] = compose_window([raw], "w", p, [Rect(0, 0, 700, 650)])
+        self.assertRect(element.rect, Rect(20, 230, 300, 30))
+        # cut by the list's bottom edge at (165 + 110) / 1.1 = 250
+        self.assertRect(element.visible[0], Rect(20, 230, 300, 20))
 
 
 if __name__ == "__main__":

@@ -155,8 +155,34 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
 - **Nächster Performance-Hebel:** QML-Flyout (Kalender) 362 Knoten ≈ 1 s →
   gebündelte asynchrone D-Bus-Aufrufe (`GetChildren` etc.) statt libatspi
   Einzelaufrufe.
-- Nicht getestet: Electron/Chromium (Flatpak-Profile sind im Test-Desktop die
-  echten → keine Tests damit), Tastaturfokus.
+- **Chromium 156 (Flatpak, 2026-11-12)**, getestet mit Wegwerf-Profil
+  (`tools/testdesk/chromium.sh`):
+  - Meldet sich ohne Hilfe gar nicht bei AT-SPI an — der Sandbox darf
+    `org.a11y.Bus` nicht fragen, ob a11y an ist. `ACCESSIBILITY_ENABLED=1`
+    (oder `--talk-name=org.a11y.Bus`) → angemeldet, aber das Fenster bleibt
+    leer bis `--force-renderer-accessibility`, auch die Browser-Oberfläche.
+    Auf dem echten Desktop ist Chromium deshalb derzeit unsichtbar.
+  - Koordinaten: nur der Inhalt von `document web` ist in DIP (÷ Skalierung);
+    Tabs, Werkzeugleiste, Adressleiste und Titelleiste nicht. Der Reader
+    markiert Web-Elemente und den Web-Teil der Clip-Kette.
+  - Echte Tabs (`page tab` in `page tab list`) sind Ziele, obwohl sie einen
+    Schließen-Knopf enthalten; die Seite selbst nur, wenn nichts in ihr
+    Ziel ist; Optionen eines geschlossenen `<select>` nicht (Chromium meldet
+    die gewählte als SHOWING).
+  - **Keine Events** außer Fokus/Textcursor/defunct: weder beim Aufbau des
+    Baums noch beim Scrollen. Abgefangen durch: leere Frames mit Backoff neu
+    lesen, Scroll-Proben (erstes Kind jedes Clip-Containers) im Poll des
+    aktiven Fensters, libatspi-Cache vor nicht-eventgetriebenem Lesen
+    leeren. Scrollen wird nach ~2 s übernommen.
+  - Langsam: ~255 Knoten in 1–1,5 s (durch den Flatpak-a11y-Proxy).
+  - Getötete Apps senden kein `window:destroy` → Frame-Liste wird bei
+    children-changed der Registry neu geholt (sonst Zuordnung zum toten
+    Frame über die gleiche Überschrift).
+- Electron: noch keine App installiert, ungetestet.
+- Sichtbare Splitter: ein Fenster, das 3 px unter einem anderen hervorschaut,
+  liefert 3 px breite Ziele — korrekt nach Scope, für die Navigation
+  vermutlich nutzlos (Mindestgröße? offen).
+- Nicht getestet: Tastaturfokus.
 - KWin-Scripts: `frameGeometry` lässt sich nur aus QML-Scripts setzen
   (`Qt.rect`); einfache Scripts ignorieren die Zuweisung stillschweigend.
 

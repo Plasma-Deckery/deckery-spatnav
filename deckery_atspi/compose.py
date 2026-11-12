@@ -31,8 +31,9 @@ class Element:
 def compose_window(raw_elements, window_id, placement, region):
     out = []
     for raw in raw_elements:
-        screen = placement.to_screen(raw.rect, raw.name)
-        clips = tuple(placement.to_screen(c) for c in raw.clips)
+        screen = placement.to_screen(raw.rect, raw.web)
+        first_web = len(raw.clips) - raw.web_clips
+        clips = tuple(placement.to_screen(c, i >= first_web) for i, c in enumerate(raw.clips))
         parts = clip(screen, clips, region)
         if parts:
             out.append(Element(raw.id, window_id, raw.role, raw.name, screen,

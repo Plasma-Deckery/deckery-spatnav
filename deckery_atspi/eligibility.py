@@ -28,7 +28,20 @@ SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES = frozenset((
     # v2, test desktop 2026-11-11: Kirigami pages in System Settings are
     # focusable "page tab"s spanning the whole sidebar / content area.
     "page tab",
+    # v2, test desktop 2026-11-12, Chromium: the page is focusable and
+    # stays a target only when nothing in it is.
+    "document web",
 ))
+
+
+def suppress_container(role_name, parent_role):
+    """A container with an eligible descendant is dropped — except a real
+    tab in a tab strip (test desktop 2026-11-12, Chromium: each tab is a
+    "page tab" in a "page tab list" with its own Close button inside; the
+    Kirigami pages above sit in a panel/filler)."""
+    if role_name == "page tab" and parent_role == "page tab list":
+        return False
+    return role_name in SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES
 
 
 def _is_enabled(node, state_set):

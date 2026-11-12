@@ -14,14 +14,13 @@ that skips every scrolled-away row."""
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
 
-from .eligibility import (SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES, is_menu_item_candidate,
-                          is_relevant_element)
+from .eligibility import is_menu_item_candidate, is_relevant_element, suppress_container
 from vendor.orca_ax.ax_component import AXComponent
 from vendor.orca_ax.ax_object import AXObject
 from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
@@ -41,6 +40,15 @@ CLIPPING_ROLES = frozenset((
 
 MAX_DEPTH = 40
 
+# Web content. Its subtree is in CSS/DIP pixels, unlike the toolkit's own UI
+# around it (placement.py rule "chromium-dip").
+WEB_DOCUMENT_ROLE = "document web"
+
+# Popup lists of a closed combo box: never on screen, yet Chromium reports
+# the selected option of a closed <select> as SHOWING (test desktop
+# 2026-11-12, inside a non-showing "menu").
+CLOSED_COMBO_POPUP_ROLES = frozenset(("menu", "list", "list box"))
+
 
 @dataclass(frozen=True)
 class RawElement:
@@ -53,6 +61,10 @@ class RawElement:
     # Geometry reconstructed by menu_repair, not reported by AT-SPI: the
     # live rect will keep disagreeing, so freshness polling must skip it.
     inferred: bool = False
+    # Inside web content (WEB_DOCUMENT_ROLE): rect and the last web_clips
+    # clips are in the web's coordinate space, the clips before it are not.
+    web: bool = False
+    web_clips: int = 0
 
 
 @dataclass
@@ -60,6 +72,11 @@ class ReadStats:
     nodes: int = 0
     pruned: int = 0
     ms: float = 0.0
+    # (accessible, rect) of the first child of every clipping container:
+    # moves whenever the container scrolls, even when none of its targets
+    # are in view (a page scrolled past all its controls). For the
+    # freshness poll.
+    probes: list = field(default_factory=list)
 
 
 def live_rect(acc):
@@ -98,12 +115,18 @@ def read_window(frame, toolkit=""):
     t0 = time.monotonic()
     out = []
 
-    def walk(node, clips, depth, target_ancestor=None):
+    def walk(node, clips, depth, target_ancestor=None, parent_role="", web_from=None):
         """Returns True if node or a descendant produced an element.
         target_ancestor: (role, rect) of the nearest ancestor that is itself
-        a target (eligibility is known pre-order from role + states)."""
+        a target (eligibility is known pre-order from role + states).
+        web_from: number of clips outside the web document this node is in."""
         stats.nodes += 1
         role = AXObject.get_role_name(node) or ""
+        if parent_role == "closed combo box" and role in CLOSED_COMBO_POPUP_ROLES:
+            stats.pruned += 1
+            return False
+        if role == WEB_DOCUMENT_ROLE and web_from is None:
+            web_from = len(clips)
         states = AXObject.get_state_set(node)
         showing = AXUtilitiesState.is_showing(node, states)
         rect = None
@@ -129,11 +152,19 @@ def read_window(frame, toolkit=""):
             produced = walk_menu(node, child_clips, depth)
         else:
             child_ancestor = (role, rect) if relevant else target_ancestor
+            as_parent = role
+            if role == "combo box" and not states.contains(Atspi.StateType.EXPANDED):
+                as_parent = "closed combo box"
+            probe = child_clips is not clips
             for child in AXObject.iter_children(node):
-                produced = walk(child, child_clips, depth + 1, child_ancestor) or produced
+                if probe:
+                    stats.probes.append((child, _rect_of(child)))
+                    probe = False
+                produced = walk(child, child_clips, depth + 1, child_ancestor,
+                                as_parent, web_from) or produced
         if not relevant:
             return produced
-        if produced and role in SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES:
+        if produced and suppress_container(role, parent_role):
             return True
         if rect is None:
             rect = _rect_of(node)
@@ -147,7 +178,9 @@ def read_window(frame, toolkit=""):
             # inside radio button 'Breeze'); Plasma panel (button inside
             # button with the same rect: launcher, tray icons, clock).
             return produced
-        out.append(RawElement(element_id(node), role, name, rect, clips, node))
+        out.append(RawElement(element_id(node), role, name, rect, clips, node,
+                              web=web_from is not None,
+                              web_clips=0 if web_from is None else len(clips) - web_from))
         return True
 
     def walk_menu(menu, clips, depth):
@@ -193,5 +226,4 @@ def read_window(frame, toolkit=""):
 def _rebase(element, dx, dy):
     def shift(r):
         return Rect(r.x - dx, r.y - dy, r.w, r.h)
-    return RawElement(element.id, element.role, element.name, shift(element.rect),
-                      tuple(shift(c) for c in element.clips), element.accessible, element.inferred)
+    return replace(element, rect=shift(element.rect), clips=tuple(shift(c) for c in element.clips))
