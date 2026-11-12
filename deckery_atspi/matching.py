@@ -103,3 +103,17 @@ def match_windows(windows, frames):
         else:
             unmatched[window.id] = "no same-pid frame, no unique caption among sandboxed frames"
     return matches, unmatched
+
+
+def pick_popover(area, groups, tolerance):
+    """The popup read into a main window that a KWin popup window shows:
+    groups is {popup id: [screen rects of its elements]} (RawElement.popup,
+    placed like the main window), area the popup window. The group whose
+    elements all lie inside area (± tolerance) wins, the largest one if
+    several do; None if none does."""
+    def within(r):
+        return (r.x >= area.x - tolerance and r.y >= area.y - tolerance
+                and r.x2 <= area.x2 + tolerance and r.y2 <= area.y2 + tolerance)
+    fits = [(len(rects), popup_id) for popup_id, rects in groups.items()
+            if rects and all(within(r) for r in rects)]
+    return max(fits)[1] if fits else None

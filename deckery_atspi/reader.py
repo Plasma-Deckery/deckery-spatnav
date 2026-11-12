@@ -93,8 +93,12 @@ class RawElement:
     # clips are in the web's coordinate space, the clips before it are not.
     web: bool = False
     web_clips: int = 0
-    # Inside a popup candidate (ReadStats.popups): its id. Dropped from
-    # this window once that popup is read as its own KWin window.
+    # Inside the popup of an EXPANDED node (a child of it lying outside
+    # it, or a combo box's list): that child's id. Test desktop
+    # 2026-11-12: GTK4 popovers (menu button, drop-down) and Chromium's
+    # <select> list are subtrees of the main window, in its coordinates,
+    # while KWin shows them as their own popup window
+    # (backend._match_popovers).
     popup: str = ""
 
     @property
@@ -122,11 +126,6 @@ class ReadStats:
     pruned: int = 0
     ms: float = 0.0
     probes: list = field(default_factory=list)   # [Probe], one per clipping container
-    # [Probe] for each child of an EXPANDED node lying outside it: where
-    # GTK4 keeps a popover (menu button, drop-down) — in this window's
-    # tree and coordinates, shown by KWin as its own popup window
-    # (backend._find_embedded_popup).
-    popups: list = field(default_factory=list)
     calls: int = 0      # D-Bus calls of the fetch (0 for the sync reader)
     # Values the walk needed that the fetch had not asked for (each one a
     # blocking call) — should stay 0, else fetch_tree misses a rule.
@@ -226,7 +225,7 @@ def _descent(role, states, depth, prune_hidden):
 
 def _children_rect_needed(role, states):
     """Whether a node's children are each placed against its rect: the
-    combo box rule and popup candidates (ReadStats.popups)."""
+    combo box rule and popups (RawElement.popup)."""
     return role == COMBO_BOX_ROLE or EXPANDED in states
 
 
@@ -289,12 +288,14 @@ def select_targets(root, prune_hidden, stats, rebase=False, inherit_disabled=Fal
                 child_popup = popup
                 if place_children:
                     inside = child.rect.empty or _contains(rect, child.rect)
-                    if role == COMBO_BOX_ROLE and inside:
+                    # Chromium: the open <select>'s "menu" has a bogus
+                    # 72x11 rect inside the combo box, its items lie below.
+                    if EXPANDED in states and (not inside or role == COMBO_BOX_ROLE
+                                               and child.role in CLOSED_COMBO_POPUP_ROLES):
+                        child_popup = child.id
+                    elif role == COMBO_BOX_ROLE and inside:
                         stats.pruned += 1
                         continue
-                    if EXPANDED in states and not inside:
-                        stats.popups.append(Probe(child.id, child.rect, child.ref))
-                        child_popup = child.id
                 produced = walk(child, child_clips, depth + 1, child_ancestor,
                                 as_parent, web_from, child_popup, child_disabled) or produced
             if own is not None and own.replaced:

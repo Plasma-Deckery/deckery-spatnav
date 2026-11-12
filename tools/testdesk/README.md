@@ -7,6 +7,7 @@ nothing touches the real desktop or its settings. Deck-like by default:
 1280x800 physical at scale 1.1 (1164x727 logical).
 
     tools/testdesk/restart_all.sh systemsettings dolphin   # desktop + apps + backend + viewer
+    tools/testdesk/restart_all.sh tools/testdesk/gtk_testapp.sh dolphin
     tools/testdesk/run_box.sh python3 tools/testdesk/scenarios.py [name ...]
     tools/testdesk/run_box.sh python3 tools/testdesk/ctl.py check
     tools/testdesk/stop.sh                                 # (on the host)
@@ -32,7 +33,19 @@ gets the same suffix: `DECKERY_TESTDESK=2 tools/testdesk/restart_all.sh …`,
   (`org.kde.KWin.EIS.RemoteDesktop`, libei through ctypes), reaching only the
   test desktop. Needed where Qt offers no AT-SPI action (context menus).
 - `scenarios.py` — occlusion, move, scroll (far + small), context menu,
-  virtual desktops, invariants.
+  virtual desktops, invariants; `gtk_*` on the GTK test app; `*_select`
+  (open `<select>`) in the browsers.
+- `gtk_testapp.py` / `gtk_testapp.sh` — GTK4 app with known content
+  (every common control with a fixed name, disabled and hidden ones, three
+  scroll containers, menu button, popover, drop-down, modal dialog, link).
+  `gtk_testapp.sh` (re)starts it in the test desktop (distrobox, PID
+  file); on the real desktop: `tools/run_desktop.sh testapp`.
+- `mode_probe.py` — measures when the signals for special modes (focus,
+  expanded, popup/dialog windows, backend update) arrive after real input,
+  per app (`gtk`, `dolphin`, `systemsettings`, `chromium`, `firefox`);
+  results in BACKEND_V2_DESIGN.md §12. Browsers with `controls.html`:
+  `CHROMIUM_PAGE=controls.html tools/testdesk/chromium.sh`,
+  `FIREFOX_PAGE=controls.html tools/testdesk/firefox.sh`.
 
 Flatpak apps use the real `~/.var/app` profile even here — don't run
 Firefox/Chromium Flatpaks in tests directly. `chromium.sh` (host) starts the

@@ -247,6 +247,67 @@ def scenario_chromium():
     return f"ok, page scroll picked up after {page_s:.1f}s, list scroll after {list_s:.1f}s"
 
 
+def scenario_browser_select(cls="org.chromium.Chromium"):
+    """An open <select> (page.html or controls.html): its options become
+    targets, and go away once one is chosen. Chromium shows them in a
+    KWin popup window, but reads them into the main window's tree in page
+    coordinates and sends only an expanded event; they must be targets of
+    the popup window. Firefox 152 draws the list inside its own window
+    (test desktop 2026-11-12): the options are targets of the main window,
+    and what lies under the list stays a target too — no occlusion inside
+    a window is known to the backend (reported, not failed)."""
+    if not has_window(cls):
+        return f"skipped (not running: {cls})"
+    ctl.kwin_raise(cls)
+    ctl.kwin_move(cls, 60, 30, 1000, 660)
+    # Raised, Firefox may focus its address bar and open the suggestions
+    # over the page: click empty page space first.
+    eis("click", 60 + 900, 30 + 600)
+    _, items = settle(timeout_s=8)
+    win = window_id(cls)
+    # the lowest one: Firefox's address bar is a combo box too
+    combo = sorted((e for e in items if e["window"] == win and e["role"] == "combo box"),
+                   key=lambda e: -e["rect"][1])
+    expect(combo, "no <select> (combo box) target")
+    before = {w["id"] for w in _popups()} | {e["id"] for e in items}
+    t0 = time.monotonic()
+    eis("click", *combo[0]["target"])
+    popup = None
+    deadline = time.monotonic() + 1.5
+    while popup is None and time.monotonic() < deadline:
+        popup = next((w for w in _popups() if w["id"] not in before), None)
+    owner = popup["id"] if popup else win
+    options = lambda it: [e for e in it if e["window"] == owner and e["id"] not in before
+                          and e["role"] in ("menu item", "list item", "option")]
+    items = wait_for(lambda it: len(options(it)) >= 2, 4)
+    latency = time.monotonic() - t0
+    screenshot(f"select-{cls}")
+    expect(len(options(items)) >= 2, f"options not targets of the {'popup' if popup else 'window'}: "
+                                     f"{[(e['role'], e['name']) for e in items if e['window'] == owner][:6]}")
+    if popup:
+        area = Rect(*popup["frame"])
+        under = [e for e in targets_in(items, area) if e["window"] != popup["id"]]
+        expect(not under, f"targets under the open <select>: {[(e['role'], e['name']) for e in under[:4]]}")
+        note = "in a popup window"
+    else:
+        listed = options(items)
+        area = Rect(min(e["rect"][0] for e in listed), min(e["rect"][1] for e in listed), 1, 1)
+        area = Rect(area.x, area.y, max(e["rect"][0] + e["rect"][2] for e in listed) - area.x,
+                    max(e["rect"][1] + e["rect"][3] for e in listed) - area.y)
+        under = [e["name"] for e in targets_in(items, area) if e not in listed]
+        note = f"in the window, still targets under the list: {under}"
+    first = min(options(items), key=lambda e: e["rect"][1])
+    eis("click", *first["target"])
+    items = wait_for(lambda it: not options(it), 4)
+    expect(not options(items), "option targets remain after choosing")
+    if popup:
+        # KWin keeps the closed popup in its stacking order for the close animation
+        deadline = time.monotonic() + 2
+        while any(w["id"] == popup["id"] for w in _popups()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    return f"options after {latency:.1f}s, {note}"
+
+
 def scenario_firefox():
     """Firefox Flatpak with a throwaway profile (tools/testdesk/firefox.sh,
     page.html). Its toolbar buttons are targets though never FOCUSABLE,
@@ -712,6 +773,10 @@ def _gtk_open_popup(items, opener, expected, count):
 def _gtk_closed(popup):
     items = wait_for(lambda it: not any(e["window"] == popup["id"] for e in it), 3)
     expect(not any(e["window"] == popup["id"] for e in items), "popup targets remain after closing it")
+    # KWin keeps the closed popup in its stacking order for the close animation
+    deadline = time.monotonic() + 2
+    while any(w["id"] == popup["id"] for w in _popups()) and time.monotonic() < deadline:
+        time.sleep(0.1)
     return items
 
 
@@ -795,7 +860,9 @@ SCENARIOS = {
     "submenu": scenario_submenu,
     "flyout": scenario_flyout,
     "chromium": scenario_chromium,
+    "chromium_select": scenario_browser_select,
     "firefox": scenario_firefox,
+    "firefox_select": lambda: scenario_browser_select("org.mozilla.firefox"),
     "gtk_controls": scenario_gtk_controls,
     "gtk_scroll": scenario_gtk_scroll,
     "gtk_tree": scenario_gtk_tree,

@@ -3,7 +3,8 @@ import os
 import unittest
 from types import SimpleNamespace
 
-from deckery_atspi.matching import match_windows
+from deckery_atspi.geometry import Rect
+from deckery_atspi.matching import match_windows, pick_popover
 from deckery_atspi.scene import scene_from_payload
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -81,3 +82,33 @@ class AmbiguityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PopoverTest(unittest.TestCase):
+    """Test desktop 2026-11-12: GTK4 popovers and Chromium's open <select>
+    are read into the main window (RawElement.popup) but shown by KWin as
+    a popup window of their own."""
+
+    def test_gtk_menu_items_inside_the_popup(self):
+        # MenuButton menu: KWin popup 124,494 180.9x157.3; items placed
+        # like the main window. A second popup group lies elsewhere.
+        area = Rect(124, 494.27, 180.91, 157.27)
+        groups = {"/menu": [Rect(124, 506.27, 169, 30), Rect(124, 536.27, 169, 30)],
+                  "/other": [Rect(500, 100, 50, 20)]}
+        self.assertEqual(pick_popover(area, groups, 4.0), "/menu")
+
+    def test_chromium_select_options(self):
+        # options in page DIP, already divided by the scale
+        area = Rect(80, 367, 65.45, 72.73)
+        groups = {"/240": [Rect(80, 367, 50.9, 23.6), Rect(80, 391, 50.9, 23.6), Rect(80, 415, 50.9, 24.5)]}
+        self.assertEqual(pick_popover(area, groups, 4.0), "/240")
+
+    def test_partly_outside_is_no_match(self):
+        area = Rect(100, 100, 100, 100)
+        groups = {"/a": [Rect(110, 110, 50, 20), Rect(110, 250, 50, 20)], "/empty": []}
+        self.assertIsNone(pick_popover(area, groups, 4.0))
+
+    def test_largest_fitting_group_wins(self):
+        area = Rect(0, 0, 300, 300)
+        groups = {"/small": [Rect(10, 10, 10, 10)], "/big": [Rect(10, 40, 10, 10), Rect(10, 60, 10, 10)]}
+        self.assertEqual(pick_popover(area, groups, 4.0), "/big")

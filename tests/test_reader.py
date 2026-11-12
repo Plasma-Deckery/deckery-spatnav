@@ -227,12 +227,21 @@ class WalkTest(unittest.TestCase):
             Node("/55", Atspi.Role.LIST_ITEM, TARGET, (105, 74, 90, 34))])
         root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
             dropdown("/1", SHOWN), dropdown("/5", SHOWN + (S.EXPANDED,), [popover])])
-        stats = ReadStats()
-        out = walk(root, False, stats)
+        out = walk(root)
         self.assertEqual(ids(out), ["1", "54", "55", "5"])
-        # the popover is a popup candidate, its items say so
-        self.assertEqual([p.id for p in stats.popups], [":1.9/53"])
+        # the popover's items say they are in it
         self.assertEqual([e.popup for e in out], ["", ":1.9/53", ":1.9/53", ""])
+
+    def test_chromium_select_list_is_a_popup(self):
+        # Chromium, open <select>: the "menu" reports a rect inside the
+        # combo box, its options lie below it.
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.COMBO_BOX, TARGET + (S.EXPANDED,), (39, 362, 72, 21), "Pick", children=[
+                Node("/2", Atspi.Role.MENU, SHOWN, (39, 362, 72, 11), children=[
+                    Node("/3", Atspi.Role.MENU_ITEM, TARGET, (40, 382, 56, 26), "Apfel")])])])
+        out = walk(root)
+        self.assertEqual(ids(out), ["3", "1"])
+        self.assertEqual([e.popup for e in out], [":1.9/2", ""])
 
     def test_same_name_keeps_focusable(self):
         # gtk_testapp: GTK4 MenuButton (non-focusable button around a
@@ -337,6 +346,7 @@ class FetchTest(unittest.TestCase):
         WalkTest.test_gtk_disabled_container,
         WalkTest.test_combo_box_rendering_not_walked,
         WalkTest.test_same_name_keeps_focusable,
+        WalkTest.test_chromium_select_list_is_a_popup,
     ]
 
     def test_same_as_full_read(self):
@@ -350,7 +360,6 @@ class FetchTest(unittest.TestCase):
                 full_stats = ReadStats()
                 self.assertEqual(out, original(root, prune_hidden, full_stats, inherit_disabled))
                 self.assertEqual(fetched_stats.probes, full_stats.probes)
-                self.assertEqual(fetched_stats.popups, full_stats.popups)
                 self.assertEqual((fetched_stats.nodes, fetched_stats.pruned),
                                  (full_stats.nodes, full_stats.pruned))
                 if stats is not None:
