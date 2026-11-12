@@ -46,6 +46,12 @@ class FrameInfo:
     # A popup that is a subtree of its main window's frame, in that
     # window's coordinates (backend._match_embedded_popups).
     embedded: bool = False
+    # Set for an embedded popup found among its main window's popup
+    # candidates (GTK4 popovers): that window's id. Its subtree is placed
+    # with the main window's placement as it is, not rebased onto the
+    # popup — the popover's accessible includes its shadow margin, the
+    # KWin popup doesn't.
+    placed_with: str = ""
 
     def to_json(self):
         return {k: v for k, v in self.__dict__.items() if k != "accessible"}

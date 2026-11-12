@@ -529,7 +529,7 @@ def scenario_coverage():
     with_targets = {e["window"] for e in items}
     # bottom → top; panels cover too, the viewer overlay doesn't
     stack = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS)
-             if not w["minimized"] and w["cls"] != "python3.14"]
+             if not w["minimized"] and not ctl.is_viewer(w)]
     windows = [w for w in stack if w["normal"]]
     # fully covered windows legitimately have none
     regions = {}
