@@ -39,9 +39,9 @@ Verdeckte Fenster und verdeckte Teile von Fenstern sind keine Ziele.
 ## 3. Architektur
 
 ```
-KWin-Script ──Update(json)──▶ ┌──────────────────────────────┐ ──State──▶ Cursor-Nav-Frontend
+KWin-Script ──Update(json)──▶ ┌──────────────────────────────┐ ──State──▶ Bedien-Anwendungen (§10)
 (Fenster, Stacking,           │ deckery-atspi (1 Prozess,    │ ──State──▶ Menü-Badges
- Monitore, aktives Fenster)   │ 1 Thread, 1 GLib-MainLoop)   │ ──Event──▶ Makima (später)
+ Monitore, aktives Fenster)   │ 1 Thread, 1 GLib-MainLoop)   │
                               │                              │
 AT-SPI-Events ──────────────▶ │ Szene → Sichtbarkeit →       │
                               │ Elemente → Veröffentlichen   │
@@ -221,11 +221,27 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
 - KWin-Scripts: `frameGeometry` lässt sich nur aus QML-Scripts setzen
   (`Qt.rect`); einfache Scripts ignorieren die Zuweisung stillschweigend.
 
-## 10. Offene Fragen
+## 10. Konsumenten (entschieden 2026-11-12)
 
-1. Plasma-Flyouts (nicht in KWins Fensterliste) — noch nicht im Test-Desktop
-   abgedeckt (dort läuft kein plasmashell).
-2. Bedienmodell des Cursor-Nav-Frontends: **Springen auf Bewegung**, kein
-   fliegender Punkt (Tendenz des Nutzers) — Details offen, eigenes Thema,
-   unabhängig vom Backend.
-3. Mehrere Monitore: eine Overlay-Fläche pro Monitor im Frontend.
+Backend, Eingabe und Bedienung sind getrennt:
+
+- **Backend (dieses Projekt):** veröffentlicht, was sichtbar und erreichbar
+  ist — vollständige Zielliste per `Changed`, sonst nichts. Kein
+  Positions-Lookup, keine Auswahl, kein Zustand der Bedienung: der Prozess
+  ist während eines Einlesens (40–280 ms, mit libatspi bis > 1 s) blockiert
+  und gehört nicht in einen Pfad mit Pad-/Stick-Rate.
+- **Makima (Rust):** liefert Eingaben (Pad-Position, Klick, Stick) und spielt
+  Haptik ab.
+- **Bedien-Anwendungen** — eigene Clients von Makima und Backend, z.B.
+  Sprung-Navigation (relativ, Zeiger springt zwischen Elementen) und
+  Tastkarte (absolut, Pad-Position → nächstes Element): halten die
+  Zielliste lokal, entscheiden selbst über Auswahl und Hysterese, bewegen
+  den Zeiger, fordern Haptik bei Makima an. Welche Modi und wie sie sich
+  bedienen ist offen und unabhängig vom Backend.
+
+## 11. Offene Fragen
+
+1. Bedienmodi (s. §10): Details offen, eigenes Thema.
+2. Mehrere Monitore: eine Overlay-Fläche pro Monitor im Frontend.
+3. Mindestgröße sichtbarer Teile (3-px-Splitter, §9) — Backend oder
+   Bedien-Anwendung?
