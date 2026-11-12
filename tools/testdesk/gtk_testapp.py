@@ -206,6 +206,9 @@ class TestWindow(Gtk.ApplicationWindow):
                 box.append(named(Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 10, 1),
                                  f"Scrollregler {i}"))
         box.append(self._button("Scrollknopf ganz unten"))
+        # Free space beside the widgets: a wheel over a slider moves the
+        # slider, not the scroll area (gtk_scroll scrolls here).
+        box.set_margin_end(24)
         scrolled = Gtk.ScrolledWindow(child=box, min_content_width=240, vexpand=True)
         scrolled.set_has_frame(True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)

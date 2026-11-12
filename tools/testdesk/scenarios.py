@@ -524,6 +524,7 @@ def scenario_hung():
         return f"skipped (not running: {missing})"
     ctl.kwin_move("systemsettings", 0, 0, 600, 500)
     ctl.kwin_move("org.kde.dolphin", 560, 60, 600, 500)
+    ctl.kwin_raise("systemsettings")  # above the browsers, after their scenarios
     ctl.kwin_raise("org.kde.dolphin")
     _, before = settle()
     dolphin_id = window_id("org.kde.dolphin")
@@ -761,12 +762,16 @@ def scenario_gtk_controls():
     return f"{len(mine)} targets"
 
 
-def _gtk_scroll(items, gtk_id, first, last, clicks):
-    """Scroll the container showing `first` until `last` is a target."""
+def _gtk_scroll(items, gtk_id, first, last, clicks, beside=False):
+    """Scroll the container showing `first` until `last` is a target —
+    with the pointer on `first`, or beside it (in the scroll area's free
+    margin: over a slider, GTK moves the slider instead)."""
     start = by_name(items, first)
     expect(start, f"{first!r} not a target before scrolling")
     expect(not by_name(items, last), f"{last!r} a target before scrolling")
     x, y = start[0]["target"]
+    if beside:
+        x = start[0]["rect"][0] + start[0]["rect"][2] + 10
     # Wheel clicks right after the pointer jumps into another scrolled
     # window partly went to the previous one: hover first.
     eis("move", x, y)
@@ -800,10 +805,10 @@ def scenario_gtk_scroll():
         return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
     gtk_id, items = setup
     times = []
-    for first, last, clicks in (("Scrollknopf 1", "Scrollknopf ganz unten", 20),
-                                ("Listenzeile 1", "Listenzeile 40", 20),
-                                ("Ordner 1", "Ordner 30", 20)):
-        items, took = _gtk_scroll(items, gtk_id, first, last, clicks)
+    for first, last, clicks, beside in (("Scrollknopf 1", "Scrollknopf ganz unten", 20, True),
+                                        ("Listenzeile 1", "Listenzeile 40", 20, False),
+                                        ("Ordner 1", "Ordner 30", 20, False)):
+        items, took = _gtk_scroll(items, gtk_id, first, last, clicks, beside)
         times.append(f"{last} {took:.1f}s")
     screenshot("gtk-scrolled-back")
     return ", ".join(times)
