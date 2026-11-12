@@ -108,13 +108,13 @@ class Batch:
             self._pushed = False
         return False
 
-    def call(self, dest, path, iface, method, args, on_reply):
+    def call(self, dest, path, iface, method, args, on_reply, timeout_ms=CALL_TIMEOUT_MS):
         """on_reply(unpacked reply tuple), or on_reply(None) on any D-Bus
         error (object gone, interface not implemented, timeout)."""
         self._pending += 1
         self.calls += 1
         self._connection.call(dest, path, iface, method, args, None, Gio.DBusCallFlags.NO_AUTO_START,
-                              CALL_TIMEOUT_MS, None, self._done, on_reply)
+                              timeout_ms, None, self._done, on_reply)
 
     def _done(self, connection, result, on_reply):
         self._pending -= 1

@@ -104,6 +104,7 @@ def scenario_occlusion():
         return f"skipped (not running: {missing})"
     ctl.kwin_move("systemsettings", 0, 0, 760, 700)
     ctl.kwin_move("org.kde.dolphin", 420, 80, 700, 600)
+    ctl.kwin_raise("systemsettings")  # above any other app window (browsers)
     ctl.kwin_raise("org.kde.dolphin")
     _, items = settle()
     screenshot("occlusion-dolphin-on-top")
@@ -244,6 +245,52 @@ def scenario_chromium():
     expect(not stale, f"after list scroll, {len(stale)} stale: {[e['name'] for e in stale[:5]]}")
     eis("scroll", x, y, -3)
     return f"ok, page scroll picked up after {page_s:.1f}s, list scroll after {list_s:.1f}s"
+
+
+def scenario_firefox():
+    """Firefox Flatpak with a throwaway profile (tools/testdesk/firefox.sh,
+    page.html). Its toolbar buttons are targets though never FOCUSABLE,
+    disabled Back/Forward are not; the auto-hidden menu bar's File/Edit/…
+    are no targets; app menu and context menu are subtrees of the browser
+    frame shown in their own KWin popup windows (test desktop 2026-11-12):
+    their items must be targets, and gone again once closed."""
+    if not has_window("org.mozilla.firefox"):
+        return "skipped (not running: tools/testdesk/firefox.sh)"
+    ctl.kwin_raise("org.mozilla.firefox")
+    ctl.kwin_move("org.mozilla.firefox", 60, 30, 1000, 660)
+    _, items = settle(timeout_s=8)
+    screenshot("firefox")
+    for name in ("Reload", "Firefox", "Erster Knopf", "Listeneintrag 1"):
+        expect(by_name(items, name), f"{name!r} not a target")
+    for name in ("Back", "File", "Edit"):
+        expect(not by_name(items, name), f"{name!r} is a target (disabled / hidden menu bar)")
+    expect(not [e for e in items if e["role"] in ("frame", "internal frame", "document web")],
+           "window, page frame or page itself is a target")
+
+    x, y = by_name(items, "Firefox")[0]["target"]
+    eis("click", x, y)
+    # (Quit is cut off when the window is shorter than the menu)
+    items = wait_for(lambda it: by_name(it, "New Window") and by_name(it, "Settings"), 6)
+    screenshot("firefox-app-menu")
+    expect(by_name(items, "New Window") and by_name(items, "Settings"), "app menu items not targets")
+    expect(not [e for e in items if e["role"] == "panel"], "the app menu itself is a target")
+    eis("key", "esc")
+    items = wait_for(lambda it: not by_name(it, "New Window"), 6)
+    expect(not by_name(items, "New Window"), "app menu items still targets after closing it")
+
+    x, y = by_name(items, "Listeneintrag 1")[0]["target"]
+    eis("rightclick", x + 450, y + 150)
+    items = wait_for(lambda it: by_name(it, "Select All") and by_name(it, "Inspect"), 6)
+    screenshot("firefox-context-menu")
+    expect(by_name(items, "Select All") and by_name(items, "Inspect"), "context menu items not targets")
+    unnamed = [e for e in items if e["role"] == "menu" and not e["name"]]
+    expect(not unnamed, f"the context menu itself is a target: {[e['rect'] for e in unnamed]}")
+    eis("key", "esc")
+    items = wait_for(lambda it: not by_name(it, "Select All"), 6)
+    expect(not by_name(items, "Select All"), "context menu items still targets after closing it")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"{len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+    return "ok"
 
 
 def scenario_menu():
@@ -480,20 +527,23 @@ def scenario_coverage():
     pid, and whole toolkits being filtered out (GTK4 without ENABLED)."""
     _, items = settle()
     with_targets = {e["window"] for e in items}
-    windows = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS)
-               if w["normal"] and not w["minimized"] and w["cls"] != "python3.14"]
+    # bottom → top; panels cover too, the viewer overlay doesn't
+    stack = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS)
+             if not w["minimized"] and w["cls"] != "python3.14"]
+    windows = [w for w in stack if w["normal"]]
     # fully covered windows legitimately have none
     regions = {}
     from deckery_atspi.scene import scene_from_payload
     missing = []
     for w in windows:
         frame = Rect(*w["frame"])
-        above = [Rect(*o["frame"]) for o in windows[windows.index(w) + 1:]]
+        above = [Rect(*o["frame"]) for o in stack[stack.index(w) + 1:]]
         from deckery_atspi.geometry import region_subtract
         region = [frame]
         for a in above:
             region = region_subtract(region, a)
-        if region and w["id"] not in with_targets:
+        # a sliver left by a same-sized window on top holds no target
+        if any(r.w >= 8 and r.h >= 8 for r in region) and w["id"] not in with_targets:
             missing.append(f"{w['cls']} {w['caption'][:30]!r}")
     expect(not missing, f"visible windows without targets: {missing}")
     return f"{len(windows)} windows covered"
@@ -513,6 +563,7 @@ SCENARIOS = {
     "submenu": scenario_submenu,
     "flyout": scenario_flyout,
     "chromium": scenario_chromium,
+    "firefox": scenario_firefox,
     "desktop_icons": scenario_desktop_icons,
     "desktops": scenario_desktops,
     "multimonitor": scenario_multimonitor,

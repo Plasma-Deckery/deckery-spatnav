@@ -12,7 +12,9 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
 
-NEVER_RELEVANT_ROLES = frozenset(("label",))
+# v2, test desktop 2026-11-12, Firefox: the window and the page's frame are
+# focusable and clickable, and became screen-sized targets.
+NEVER_RELEVANT_ROLES = frozenset(("label", "frame"))
 
 # Dropped when they have an eligible descendant: the descendants are the
 # real targets, the container would just be a huge box around them.
@@ -32,19 +34,28 @@ SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES = frozenset((
     # v2, test desktop 2026-11-12, Chromium: the page is focusable and
     # stays a target only when nothing in it is.
     "document web",
+    # v2, test desktop 2026-11-12, Firefox: the frame around the page.
+    "internal frame",
 ))
 
 
-def suppress_container(role_name, parent_role):
+def suppress_container(role_name, parent_role, get_name=lambda: ""):
     """A container with an eligible descendant is dropped — except a real
     tab in a tab strip (test desktop 2026-11-12, Chromium: each tab is a
     "page tab" in a "page tab list" with its own Close button inside; the
     Kirigami pages above sit in a panel/filler)."""
     if role_name == "page tab" and parent_role == "page tab list":
         return False
+    if role_name == "menu":
+        # Test desktop 2026-11-12, Firefox: an open context menu is an
+        # unnamed "menu" around its items (in the browser frame's tree
+        # until its popup window is matched); a named one is a menu-bar
+        # entry or submenu item, a target of its own.
+        return not get_name()
     return role_name in SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES
 
 SHOWING = int(Atspi.StateType.SHOWING)
+VISIBLE = int(Atspi.StateType.VISIBLE)
 ENABLED = int(Atspi.StateType.ENABLED)
 SENSITIVE = int(Atspi.StateType.SENSITIVE)
 FOCUSABLE = int(Atspi.StateType.FOCUSABLE)
@@ -70,17 +81,18 @@ def _is_enabled(states):
 
 
 def is_relevant(role_name, states, get_name):
-    """FOCUSABLE+SHOWING+ENABLED, with a role-based fallback for QML/
-    Kirigami list rows (not focusable there) and Firefox's named menu-bar
-    menus (not SHOWING while closed). get_name() is only called for the
-    roles that need it (menu, canvas): every AT-SPI call is a round trip
+    """FOCUSABLE+SHOWING+ENABLED, with a role-based fallback for controls
+    that are clickable without being focusable. get_name() is only called
+    for the roles that need it (canvas): every AT-SPI call is a round trip
     (~0.4 ms when made one at a time, profiled on the test desktop)."""
     if role_name in NEVER_RELEVANT_ROLES:
         return False
     is_showing = SHOWING in states
     is_enabled = _is_enabled(states)
-    if role_name == "menu" and get_name():
-        return is_enabled
+    # v2, real desktop 2026-11-12: Firefox 152's menu-bar menus used to be
+    # targets regardless of SHOWING (an old prototype rule); they are
+    # SHOWING exactly while the menu bar is, and the hidden one left its
+    # File/Edit/… outlines over the tab strip.
     if not (is_showing and is_enabled):
         return False
     # Orca's AXUtilitiesState.is_focusable also counts FOCUSED.
@@ -93,8 +105,16 @@ def is_relevant(role_name, states, get_name):
         return True
     # v2, test desktop 2026-11-11: Qt menu items are SHOWING but never
     # FOCUSABLE (Dolphin context menu, menu bar submenus).
-    return role_name in ("list item", "table cell", "tree item",
-                         "menu item", "check menu item", "radio menu item")
+    # v2, test desktop 2026-11-12: Firefox's toolbar buttons (Reload, the
+    # app menu, extensions …) are never FOCUSABLE either.
+    return role_name in CLICKABLE_WITHOUT_FOCUS_ROLES
+
+
+CLICKABLE_WITHOUT_FOCUS_ROLES = frozenset((
+    "list item", "table cell", "tree item",
+    "menu", "menu item", "check menu item", "radio menu item",
+    "button", "push button", "toggle button",
+))
 
 
 MENU_ITEM_ROLES = frozenset(("menu item", "check menu item", "radio menu item"))

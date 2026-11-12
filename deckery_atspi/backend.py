@@ -25,9 +25,12 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi, GLib
 
+from vendor.orca_ax.ax_object import AXObject
+
 from .atspi_frames import POPUP_ROLES, element_id, frame_info, list_frames
 from .compose import compose_window
-from .matching import match_windows
+from .geometry import Rect
+from .matching import Match, match_windows
 from .placement import placement_for
 from .reader import live_rects, read_window
 from .scene import LAYER_OVERLAY
@@ -58,6 +61,13 @@ ACTIVE_POLL_MAX_ELEMENTS = 60
 # Frames are re-listed on window:create/destroy; this bounds how often an
 # unmatched visible window can trigger an extra re-list.
 FRAME_RELIST_MIN_INTERVAL_S = 2.0
+# How often an unmatched popup window may be looked for again among its
+# main window's children (backend._match_embedded_popups).
+EMBEDDED_POPUP_RETRY_S = 0.2
+# Firefox rounds its popup size in CSS pixels, KWin's is logical at
+# fractional scale: 198x243 vs 199.09x245.45 at scale 1.1 (test desktop
+# 2026-11-12). Position and size both have to fit.
+EMBEDDED_POPUP_TOLERANCE = 4.0
 
 _CONTENT_EVENTS = (
     "object:children-changed",
@@ -99,6 +109,10 @@ class Backend:
         # the rate-limited retry.
         self._relisted_for = set()
         self._empty_rereads = {}  # window_id -> re-reads of an empty frame so far
+        self._unresponsive_apps = {}  # bus name -> since (atspi_frames.list_frames)
+        self._last_frames = []  # the last list_frames result, kept when self.frames is reset
+        self._embedded_popups = {}  # popup window_id -> FrameInfo (embedded)
+        self._embedded_tried = {}  # popup window_id -> monotonic time of the last search
 
     # ---- inputs ----
 
@@ -188,13 +202,16 @@ class Backend:
         frames = list(self.frames)
         known = {f.id for f in frames}
         for eid, acc in list(self._popups.items()):
+            # frame_info's libatspi calls can dispatch AT-SPI events, and a
+            # showing=False one already pops eid (real desktop 2026-11-12:
+            # KeyError here left stale menu outlines behind).
             try:
                 info = frame_info(acc)
             except Exception:
-                del self._popups[eid]
+                self._popups.pop(eid, None)
                 continue
             if not info.showing:
-                del self._popups[eid]
+                self._popups.pop(eid, None)
             elif eid not in known:
                 frames.append(info)
         return frames
@@ -263,14 +280,78 @@ class Backend:
 
     def _relist_frames(self):
         t0 = time.monotonic()
-        self.frames = list_frames()
+        silent_before = set(self._unresponsive_apps)
+        self.frames = list_frames(self._unresponsive_apps, self._last_frames)
+        self._last_frames = self.frames
         self._frames_listed_at = time.monotonic()
-        self._log(f"[frames] {len(self.frames)} AT-SPI frames in {1000 * (self._frames_listed_at - t0):.0f} ms")
+        newly_silent = set(self._unresponsive_apps) - silent_before
+        self._log(f"[frames] {len(self.frames)} AT-SPI frames in {1000 * (self._frames_listed_at - t0):.0f} ms"
+                  + (f", not answering: {' '.join(sorted(newly_silent))}" if newly_silent else ""))
 
     def _match(self, scene):
         candidates = [w for w in scene.windows if w.layer < LAYER_OVERLAY]
         self.frames_all = self._all_frames()
-        return match_windows(candidates, self.frames_all)
+        matches, unmatched = match_windows(candidates, self.frames_all)
+        self._match_embedded_popups(scene, candidates, matches, unmatched)
+        return matches, unmatched
+
+    def _match_embedded_popups(self, scene, windows, matches, unmatched):
+        """Popup windows whose AT-SPI side is no frame of its own but a
+        child of the main window's frame, in the main window's
+        coordinates. Test desktop 2026-11-12, Firefox 152: app menu
+        ("panel") and context menus ("menu") are children of the browser
+        frame; KWin shows each as its own popup window, which matched no
+        frame, while the main window's copy of its items lay under that
+        popup and was occluded — the menu had no targets at all."""
+        for window in windows:
+            if window.id not in unmatched or "popupWindow" not in window.flags:
+                continue
+            info = self._embedded_popups.get(window.id)
+            if info is None:
+                now = time.monotonic()
+                if now - self._embedded_tried.get(window.id, 0.0) < EMBEDDED_POPUP_RETRY_S:
+                    continue
+                self._embedded_tried[window.id] = now
+                info = self._find_embedded_popup(scene, window, windows, matches)
+                if info is None:
+                    continue
+                self._embedded_popups[window.id] = info
+            self.frames_all.append(info)
+            matches[window.id] = Match(len(self.frames_all) - 1, "embedded-popup")
+            del unmatched[window.id]
+
+    def _find_embedded_popup(self, scene, popup, windows, matches):
+        """The SHOWING child of a same-pid main window's frame that lies
+        exactly where KWin shows the popup."""
+        mains = sorted((w for w in windows if w.pid == popup.pid and w.id in matches
+                        and "popupWindow" not in w.flags),
+                       key=lambda w: -(w.frame.area if w.frame else 0))
+        target = popup.client
+        for main in mains:
+            frame = self.frames_all[matches[main.id].frame_index]
+            if frame.embedded:
+                continue
+            place = placement_for(scene, main, frame.toolkit, frame.toolkit_version)
+            for child in AXObject.iter_children(frame.accessible):
+                try:
+                    ext = child.get_extents(Atspi.CoordType.WINDOW)
+                except Exception:
+                    continue
+                if ext.width <= 0 or ext.height <= 0:
+                    continue
+                r = place.to_screen(Rect(ext.x, ext.y, ext.width, ext.height))
+                if max(abs(r.x - target.x), abs(r.y - target.y),
+                       abs(r.w - target.w), abs(r.h - target.h)) > EMBEDDED_POPUP_TOLERANCE:
+                    continue
+                try:
+                    info = frame_info(child)
+                except Exception:
+                    continue
+                if info.showing:
+                    return dataclasses.replace(info, embedded=True, pid=frame.pid,
+                                               toolkit=frame.toolkit,
+                                               toolkit_version=frame.toolkit_version)
+        return None
 
     def _update(self, reread_bus_names, reread_windows=()):
         scene = self.scene
@@ -317,7 +398,7 @@ class Backend:
                     # (The batched reader doesn't use libatspi's cache, but
                     # frame_info and DECKERY_READER=sync do.)
                     frame.accessible.clear_cache()
-                raw, stats = read_window(frame.accessible, frame.toolkit)
+                raw, stats = read_window(frame.accessible, frame.toolkit, rebase=frame.embedded)
                 self._raw[window_id] = (frame.id, size, raw)
                 self._probes[window_id] = stats.probes
                 if stats.nodes <= 1:
@@ -338,6 +419,10 @@ class Backend:
                 del self._raw[window_id]
                 self._probes.pop(window_id, None)
                 self._empty_rereads.pop(window_id, None)
+        for window_id in list(self._embedded_popups) + list(self._embedded_tried):
+            if window_id not in by_id:
+                self._embedded_popups.pop(window_id, None)
+                self._embedded_tried.pop(window_id, None)
 
         self.elements = elements
         if reads:

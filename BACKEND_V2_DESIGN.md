@@ -222,6 +222,34 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
 - Sichtbare Splitter: ein Fenster, das 3 px unter einem anderen hervorschaut,
   liefert 3 px breite Ziele — korrekt nach Scope, für die Navigation
   vermutlich nutzlos (Mindestgröße? offen).
+- **Firefox 152 (Flatpak, 2026-11-12)**, getestet mit Wegwerf-Profil
+  (`tools/testdesk/firefox.sh`), Fehlerbilder vom echten Desktop:
+  - Werkzeugleisten-Knöpfe (Reload, App-Menü, Erweiterungen …) sind nie
+    `focusable` → `button`/`toggle button` zählen auch ohne Fokus.
+    Deaktivierte (Zurück ohne Verlauf) haben weder ENABLED noch SENSITIVE.
+  - Die automatisch versteckte Menüleiste: Datei/Bearbeiten/… haben SHOWING
+    genau dann, wenn sie sichtbar ist (alte Prototyp-Regel „benannte Menüs
+    immer“ entfernt — die Geister-Umrisse über der Tableiste); ihre
+    Werkzeugleiste meldet (-1,-1,-1,-1), der Schließen-Knopf darin bleibt
+    SHOWING oberhalb des Fensters → Werkzeugleiste ohne Größe wird nicht
+    betreten.
+  - App-Menü (`panel`) und Kontextmenüs (`menu`) sind **Kinder des
+    Browser-Frames** in dessen Koordinaten, KWin zeigt sie als eigene
+    Popup-Fenster. Zuordnung über Lage + Größe (Toleranz 4 px: Firefox
+    rundet CSS-Pixel, KWin ist logisch bei Skalierung 1,1), eingelesen als
+    eigener Frame mit Rebase auf den Popup-Ursprung.
+  - Ein **geschlossenes** Kontextmenü bleibt mit seinen Einträgen im Baum,
+    die Einträge sogar SHOWING; nur das Menü selbst ist weder SHOWING noch
+    VISIBLE → solche Knoten werden in keinem Toolkit betreten.
+  - Fenster, Seitenrahmen (`internal frame`) und Popup-Wurzel sind nie Ziele.
+- **Hängende AT-SPI-Anwendungen (echter Desktop):** `ibus-extension-gtk3`
+  (~20 s) und ein Python-Script mit blockierter Hauptschleife (~6 s) pro
+  Fensterliste — das Backend stand so lange still (2–4 s nachhängende
+  Umrisse). Jetzt: alle Anwendungen parallel mit 500 ms anfragen, stumme
+  30 s auslassen und mit ihren bisherigen Frames behalten.
+- **KWins eigenes Fenstermenü** (Fenster-Icon, Alt+F3): ein KWin-internes
+  Fenster ohne AT-SPI-Inhalt — die KWin-Anwendung hat keine Kinder und
+  sendet keine Events. Nicht lesbar.
 - Nicht getestet: Tastaturfokus.
 - KWin-Scripts: `frameGeometry` lässt sich nur aus QML-Scripts setzen
   (`Qt.rect`); einfache Scripts ignorieren die Zuweisung stillschweigend.

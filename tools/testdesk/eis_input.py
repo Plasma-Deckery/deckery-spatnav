@@ -32,8 +32,11 @@ KEYS = {
     "esc": 1, "escape": 1, "tab": 15, "enter": 28, "return": 28, "space": 57, "backspace": 14,
     "ctrl": 29, "shift": 42, "alt": 56, "super": 125, "menu": 127,
     "up": 103, "down": 108, "left": 105, "right": 106, "home": 102, "end": 107,
-    "pageup": 104, "pagedown": 109, "f10": 68, "delete": 111,
+    "pageup": 104, "pagedown": 109, "delete": 111,
+    "f11": 87, "f12": 88,
 }
+for _i in range(10):
+    KEYS[f"f{_i + 1}"] = 59 + _i
 for _i, _c in enumerate("1234567890"):
     KEYS[_c] = 2 + _i
 for _row, _start in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)):

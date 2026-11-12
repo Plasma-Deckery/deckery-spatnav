@@ -35,7 +35,7 @@ from vendor.orca_ax.ax_object import AXObject
 
 from .atspi_bus import ACCESSIBLE, COMPONENT, COORD_TYPE_WINDOW, NULL_PATH, PROPERTIES, shared_bus
 from .atspi_frames import element_id
-from .eligibility import (EXPANDED, SHOWING, is_menu_item_candidate, is_relevant, states_from_bits,
+from .eligibility import (EXPANDED, SHOWING, VISIBLE, is_menu_item_candidate, is_relevant, states_from_bits,
                           states_from_state_set, suppress_container)
 from .geometry import Rect
 from .menu_repair import repair_menu_layout
@@ -47,7 +47,14 @@ from .menu_repair import repair_menu_layout
 CLIPPING_ROLES = frozenset((
     "scroll pane", "viewport", "list", "list box", "tree", "tree table", "table",
     "document frame", "document web", "page tab list",
+    # Also clips nothing as such — listed for COLLAPSED_IF_EMPTY_ROLES.
+    "tool bar",
 ))
+# Containers whose children are off screen when they report no size.
+# Test desktop 2026-11-12, Firefox: the auto-hidden menu bar's tool bar
+# reports (-1,-1,-1,-1) while its Close button keeps SHOWING with a rect
+# poking out above the window.
+COLLAPSED_IF_EMPTY_ROLES = frozenset(("tool bar",))
 
 MAX_DEPTH = 40
 
@@ -150,12 +157,13 @@ PRUNE_NOT_SHOWING_TOOLKITS = frozenset(("qt",))
 LEAF, SUBMENU, MENU, CHILDREN = "leaf", "submenu", "menu", "children"
 
 
-def _child_clips(rect, clips):
+def _child_clips(role, rect, clips):
     """For a clipping container: the clips its children are cut to, or
     None if it lies entirely outside its own clipping ancestors (whole
-    subtree skipped). An empty rect clips nothing."""
+    subtree skipped). An empty rect clips nothing, except for a collapsed
+    container."""
     if rect.empty:
-        return clips
+        return None if role in COLLAPSED_IF_EMPTY_ROLES else clips
     if not _inside(rect, clips):
         return None
     return clips + (rect,)
@@ -173,8 +181,12 @@ def _role_for_children(role, states):
     return role
 
 
-def _descent(role, showing, depth, prune_hidden):
-    if depth >= MAX_DEPTH or (prune_hidden and not showing and depth > 0):
+def _descent(role, states, depth, prune_hidden):
+    showing = SHOWING in states
+    if depth >= MAX_DEPTH or (depth > 0 and not showing and (prune_hidden or VISIBLE not in states)):
+        # Neither SHOWING nor VISIBLE: off screen in every toolkit. Test
+        # desktop 2026-11-12, Firefox: a closed context menu stays in the
+        # browser frame's tree with its old rect, its items still SHOWING.
         return LEAF
     if role == "popup menu":
         # A submenu is its own surface (own KWin popup window), read as
@@ -185,7 +197,7 @@ def _descent(role, showing, depth, prune_hidden):
 
 # ---- the walk ----
 
-def select_targets(root, prune_hidden, stats):
+def select_targets(root, prune_hidden, stats, rebase=False):
     """The targets under root. Nodes provide id, role, states (set of
     Atspi.StateType ints), rect, name, children, alive and ref; the walk
     reads each only where it needs it (a LiveNode turns every first read
@@ -209,15 +221,18 @@ def select_targets(root, prune_hidden, stats):
         child_clips = clips
         if role in CLIPPING_ROLES:
             rect = node.rect
-            child_clips = _child_clips(rect, clips)
+            child_clips = _child_clips(role, rect, clips)
             if child_clips is None:
                 stats.pruned += 1
                 return False
-        relevant = is_relevant(role, states, lambda: node.name)
+        # The root (window, popup) is never a target itself: test desktop
+        # 2026-11-12, a Firefox context menu ("menu", SHOWING) became one
+        # box around its own items.
+        relevant = depth > 0 and is_relevant(role, states, lambda: node.name)
         if relevant and rect is None:
             rect = node.rect
         produced = False
-        descent = _descent(role, SHOWING in states, depth, prune_hidden)
+        descent = _descent(role, states, depth, prune_hidden)
         if descent is LEAF:
             stats.pruned += depth < MAX_DEPTH
         elif descent is SUBMENU:
@@ -236,7 +251,7 @@ def select_targets(root, prune_hidden, stats):
                                 as_parent, web_from) or produced
         if not relevant:
             return produced
-        if produced and suppress_container(role, parent_role):
+        if produced and suppress_container(role, parent_role, lambda: node.name):
             return True
         if rect.empty or not _inside(rect, clips):
             return produced
@@ -284,7 +299,9 @@ def select_targets(root, prune_hidden, stats):
     # Qt reports a submenu's WINDOW coordinates relative to its parent menu
     # (Dolphin's "Create New" opening leftwards: x=-316), while it is placed
     # on screen as its own popup surface: rebase onto the popup's own origin.
-    if root.role == "popup menu":
+    # rebase: the same for a popup living inside its main window's tree
+    # (Firefox, backend._match_embedded_popups).
+    if rebase or root.role == "popup menu":
         base = root.rect
         if base.x or base.y:
             out = [_rebase(e, base.x, base.y) for e in out]
@@ -525,7 +542,7 @@ class _TreeFetch:
         # Not walked: nothing but a scroll probe's rect is looked at.
         walked = not _closed_combo_popup(role, parent_role)
         asked_name = []
-        relevant = walked and is_relevant(role, node.states, lambda: asked_name.append(True) or "")
+        relevant = walked and depth > 0 and is_relevant(role, node.states, lambda: asked_name.append(True) or "")
         # Menu children: walk_menu looks at every child's rect, and names
         # the ones menu_repair reconstructs. The frame itself: rebasing
         # (popup menus) and the menu debug log.
@@ -549,10 +566,10 @@ class _TreeFetch:
     def _descend(self, node, clips, depth):
         child_clips = clips
         if node.role in CLIPPING_ROLES:
-            child_clips = _child_clips(node._rect, clips)
+            child_clips = _child_clips(node.role, node._rect, clips)
             if child_clips is None:
                 return
-        descent = _descent(node.role, SHOWING in node.states, depth, self._prune_hidden)
+        descent = _descent(node.role, node.states, depth, self._prune_hidden)
         if descent is LEAF or descent is SUBMENU:
             return
         # As in the walk: walk_menu passes no parent role, and only plain
@@ -581,16 +598,16 @@ def fetch_tree(bus, frame, prune_hidden, stats):
 
 # ---- entry points ----
 
-def read_window(frame, toolkit="", mode=None):
+def read_window(frame, toolkit="", mode=None, rebase=False):
     mode = mode or READER_MODE
     if mode == "compare":
-        return _read_compare(frame, toolkit)
+        return _read_compare(frame, toolkit, rebase)
     stats = ReadStats()
     prune_hidden = (toolkit or "").lower() in PRUNE_NOT_SHOWING_TOOLKITS
     t0 = time.monotonic()
     bus = shared_bus() if mode != "sync" else None
     root = fetch_tree(bus, frame, prune_hidden, stats) if bus else LiveNode(frame)
-    out = select_targets(root, prune_hidden, stats)
+    out = select_targets(root, prune_hidden, stats, rebase)
     stats.ms = 1000 * (time.monotonic() - t0)
     return out, stats
 
@@ -598,18 +615,18 @@ def read_window(frame, toolkit="", mode=None):
 _compare_sync_first = False
 
 
-def _read_compare(frame, toolkit):
+def _read_compare(frame, toolkit, rebase):
     """Both readers on the same frame, alternating which goes first (the
     first read of a tree warms the app's side). Returns the fetched result;
     differences go to stderr."""
     global _compare_sync_first
     _compare_sync_first = not _compare_sync_first
     if _compare_sync_first:
-        old, old_stats = read_window(frame, toolkit, "sync")
-        new, stats = read_window(frame, toolkit, "async")
+        old, old_stats = read_window(frame, toolkit, "sync", rebase)
+        new, stats = read_window(frame, toolkit, "async", rebase)
     else:
-        new, stats = read_window(frame, toolkit, "async")
-        old, old_stats = read_window(frame, toolkit, "sync")
+        new, stats = read_window(frame, toolkit, "async", rebase)
+        old, old_stats = read_window(frame, toolkit, "sync", rebase)
     stats.note = f"/sync={old_stats.ms:.0f}ms/{stats.calls}c"
     if new != old:
         stats.note += "/DIFF"

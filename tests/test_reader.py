@@ -53,18 +53,31 @@ class EligibilityTest(unittest.TestCase):
 
     def test_gtk4_sensitive_counts_as_enabled(self):
         states = frozenset(int(s) for s in (S.SHOWING, S.SENSITIVE, S.FOCUSABLE))
-        self.assertTrue(el.is_relevant("button", states, lambda: ""))
+        self.assertTrue(el.is_relevant("slider", states, lambda: ""))
 
     def test_focused_counts_as_focusable(self):
         states = frozenset(int(s) for s in (S.SHOWING, S.ENABLED, S.FOCUSED))
-        self.assertTrue(el.is_relevant("button", states, lambda: ""))
+        self.assertTrue(el.is_relevant("slider", states, lambda: ""))
+        self.assertFalse(el.is_relevant("slider", frozenset(int(s) for s in SHOWN), lambda: ""))
+
+    def test_firefox_toolbar_buttons_without_focus(self):
+        self.assertTrue(el.is_relevant("button", frozenset(int(s) for s in SHOWN), lambda: ""))
+        # Back with no history: SHOWING, but neither ENABLED nor SENSITIVE
+        self.assertFalse(el.is_relevant("button", frozenset((int(S.SHOWING),)), lambda: ""))
+
+    def test_firefox_hidden_menu_bar_menus(self):
+        hidden = frozenset(int(s) for s in (S.ENABLED, S.FOCUSABLE, S.VISIBLE))
+        self.assertFalse(el.is_relevant("menu", hidden, lambda: "File"))
+        self.assertTrue(el.is_relevant("menu", hidden | {int(S.SHOWING)}, lambda: "File"))
+
+    def test_window_never_a_target(self):
+        self.assertFalse(el.is_relevant("frame", frozenset(int(s) for s in TARGET), lambda: "Firefox"))
 
     def test_name_only_asked_where_it_matters(self):
         asked = []
         states = frozenset(int(s) for s in TARGET)
         el.is_relevant("button", states, lambda: asked.append(1) or "")
         self.assertEqual(asked, [])
-        self.assertTrue(el.is_relevant("menu", frozenset((int(S.ENABLED),)), lambda: "File"))
         self.assertTrue(el.is_relevant("canvas", frozenset(int(s) for s in SHOWN), lambda: "Home"))
         self.assertFalse(el.is_relevant("canvas", frozenset(int(s) for s in SHOWN), lambda: ""))
         self.assertFalse(el.is_relevant("label", states, lambda: "x"))
@@ -98,12 +111,37 @@ class WalkTest(unittest.TestCase):
         # scroll probe: first child of the clipping container
         self.assertEqual([(p.id[-2:], p.rect) for p in stats.probes], [("/2", Rect(0, 0, 100, 20))])
 
-    def test_qt_hidden_subtree_pruned(self):
+    def test_collapsed_tool_bar_not_walked(self):
+        # Firefox's auto-hidden menu bar: tool bar without size, its Close
+        # button SHOWING above the window.
         root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
-            Node("/1", Atspi.Role.MENU, (S.ENABLED,), children=[
+            Node("/1", Atspi.Role.TOOL_BAR, SHOWN, (-1, -1, -1, -1), "Menu Bar", children=[
+                Node("/2", Atspi.Role.PUSH_BUTTON, SHOWN, (1123, -11, 40, 23), "Close")]),
+            Node("/3", Atspi.Role.TOOL_BAR, SHOWN, (0, 0, 400, 40), "Navigation", children=[
+                Node("/4", Atspi.Role.PUSH_BUTTON, SHOWN, (0, 0, 40, 40), "Reload")])])
+        self.assertEqual(ids(walk(root)), ["4"])
+
+    def test_qt_hidden_subtree_pruned(self):
+        # not SHOWING, but VISIBLE: only pruned where SHOWING is trusted
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.MENU, (S.ENABLED, S.VISIBLE), children=[
                 Node("/2", Atspi.Role.MENU_ITEM, SHOWN, (0, 0, 10, 10), "Quit")])])
         self.assertEqual(ids(walk(root, prune_hidden=True)), [])
         self.assertEqual(ids(walk(root, prune_hidden=False)), ["2"])
+
+    def test_open_unnamed_menu_is_a_container(self):
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.MENU, SHOWN + (S.VISIBLE,), (600, 369, 160, 229), children=[
+                Node("/2", Atspi.Role.MENU_ITEM, SHOWN, (609, 378, 35, 29), "Reload"),
+                Node("/3", Atspi.Role.MENU, SHOWN + (S.VISIBLE,), (609, 410, 150, 25), "Ask")])])
+        self.assertEqual(ids(walk(root)), ["2", "3"])
+
+    def test_neither_showing_nor_visible_pruned(self):
+        # Firefox: a closed context menu keeps its items, still SHOWING
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.MENU, (S.ENABLED,), (600, 369, 160, 229), children=[
+                Node("/2", Atspi.Role.MENU_ITEM, SHOWN, (609, 378, 35, 29), "Reload")])])
+        self.assertEqual(ids(walk(root)), [])
 
     def test_popup_menu_repair_and_rebase(self):
         # Root popup menu at (100, 50): repaired items inferred, all rebased
@@ -146,7 +184,7 @@ class WalkTest(unittest.TestCase):
     def test_closed_combo_box_options_skipped(self):
         def combo(path, states):
             return Node(path, Atspi.Role.COMBO_BOX, states, (0, 0, 100, 20), "Pick", children=[
-                Node(path + "1", Atspi.Role.MENU, (S.ENABLED,), (0, 20, 100, 60), children=[
+                Node(path + "1", Atspi.Role.MENU, (S.ENABLED, S.VISIBLE), (0, 20, 100, 60), children=[
                     Node(path + "2", Atspi.Role.MENU_ITEM, TARGET, (0, 20, 100, 20), "b")])])
         root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
             combo("/1", TARGET), combo("/5", TARGET + (S.EXPANDED,))])
@@ -243,6 +281,9 @@ class FetchTest(unittest.TestCase):
         WalkTest.test_nested_duplicate_keeps_outer,
         WalkTest.test_clipped_away_subtree_not_walked,
         WalkTest.test_qt_hidden_subtree_pruned,
+        WalkTest.test_neither_showing_nor_visible_pruned,
+        WalkTest.test_open_unnamed_menu_is_a_container,
+        WalkTest.test_collapsed_tool_bar_not_walked,
         WalkTest.test_popup_menu_repair_and_rebase,
         WalkTest.test_web_space_and_clips,
         WalkTest.test_document_alone_is_a_target,
