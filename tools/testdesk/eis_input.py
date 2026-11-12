@@ -10,7 +10,11 @@ never the real one. Run on the HOST (libei lives there):
     ... rightclick X Y | move X Y | scroll X Y CLICKS | key NAME [NAME ...]
     ... combo alt+f   (keys pressed together, released in reverse)
 
-Coordinates are logical screen pixels, same space as the backend's rects."""
+Coordinates are logical screen pixels, same space as the backend's rects.
+
+Prints "input <press> <release>" on exit: time.monotonic()
+(CLOCK_MONOTONIC, the same clock in the distrobox) right after the last
+press and release were sent — for latency measurements (mode_probe.py)."""
 
 import ctypes
 import ctypes.util
@@ -95,6 +99,7 @@ class EisInput:
         if _lib.ei_setup_backend_fd(self._ei, fd) != 0:
             raise RuntimeError("ei_setup_backend_fd failed")
         self._sequence = 0
+        self.last_press = self.last_release = None
         self.devices = []
         self._resumed = set()
         self._wait(lambda: self._has(CAP_POINTER_ABSOLUTE) and self._has(CAP_KEYBOARD), 5.0)
@@ -154,6 +159,7 @@ class EisInput:
         action(device)
         _lib.ei_device_frame(device, _lib.ei_now(self._ei))
         _lib.ei_device_stop_emulating(device)
+        self.sent = time.monotonic()
         self._pump(0.03)
 
     def move(self, x, y):
@@ -161,6 +167,10 @@ class EisInput:
 
     def button(self, button, press):
         self._emit(CAP_BUTTON, lambda d: _lib.ei_device_button_button(d, button, press))
+        if press:
+            self.last_press = self.sent
+        else:
+            self.last_release = self.sent
 
     def click(self, x, y, button=BTN_LEFT):
         self.move(x, y)
@@ -172,9 +182,14 @@ class EisInput:
     def scroll(self, x, y, clicks):
         self.move(x, y)
         self._emit(CAP_SCROLL, lambda d: _lib.ei_device_scroll_discrete(d, 0, 120 * clicks))
+        self.last_press = self.last_release = self.sent
 
     def key(self, code, press):
         self._emit(CAP_KEYBOARD, lambda d: _lib.ei_device_keyboard_key(d, code, press))
+        if press:
+            self.last_press = self.sent
+        else:
+            self.last_release = self.sent
 
     def tap(self, *names):
         codes = [KEYS[n.lower()] for n in names]
@@ -207,6 +222,8 @@ def main(argv):
         print(__doc__)
         return 2
     time.sleep(0.1)
+    if eis.last_press is not None:
+        print(f"input {eis.last_press:.6f} {eis.last_release or eis.last_press:.6f}", flush=True)
     return 0
 
 

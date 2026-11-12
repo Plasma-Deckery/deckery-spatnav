@@ -41,8 +41,9 @@ def ids(elements):
     return [e.id.rsplit("/", 1)[1] for e in elements]
 
 
-def walk(root, prune_hidden=False, stats=None):
-    return select_targets(root, prune_hidden, stats if stats is not None else ReadStats())
+def walk(root, prune_hidden=False, stats=None, inherit_disabled=False):
+    return select_targets(root, prune_hidden, stats if stats is not None else ReadStats(),
+                          inherit_disabled=inherit_disabled)
 
 
 class EligibilityTest(unittest.TestCase):
@@ -202,6 +203,59 @@ class WalkTest(unittest.TestCase):
                     Node("/6", Atspi.Role.PUSH_BUTTON, TARGET, (10, 40, 20, 20), "OK")])])])
         self.assertEqual(ids(walk(root)), ["3", "2", "6"])
 
+    def test_gtk_disabled_container(self):
+        # gtk_testapp: insensitive Gtk.Frame — its "grouping" lacks
+        # SENSITIVE, the button inside keeps it.
+        gtk = (S.SHOWING, S.SENSITIVE, S.FOCUSABLE)
+        root = Node("/0", Atspi.Role.FRAME, (S.SHOWING, S.SENSITIVE), children=[
+            Node("/1", Atspi.Role.GROUPING, (S.SHOWING,), (0, 0, 200, 60), children=[
+                Node("/2", Atspi.Role.PUSH_BUTTON, gtk, (0, 20, 200, 34), "In group")]),
+            Node("/3", Atspi.Role.PUSH_BUTTON, gtk, (0, 80, 100, 34), "Outside")])
+        self.assertEqual(ids(walk(root, inherit_disabled=True)), ["3"])
+        self.assertEqual(ids(walk(root)), ["2", "3"])
+
+    def test_combo_box_rendering_not_walked(self):
+        # gtk_testapp, GTK4 DropDown: combo box > toggle button > focusable
+        # unnamed panel, all in the combo's box; open, the popover's list
+        # box is a child outside it.
+        def dropdown(path, states, popup=()):
+            return Node(path, Atspi.Role.COMBO_BOX, states, (100, 0, 80, 34), "Apfel", children=[
+                Node(path + "1", Atspi.Role.TOGGLE_BUTTON, TARGET, (100, 0, 80, 34), "Apfel", children=[
+                    Node(path + "2", Atspi.Role.PANEL, TARGET, (100, 0, 37, 24))]), *popup])
+        popover = Node("/53", Atspi.Role.LIST_BOX, SHOWN, (97, 32, 114, 160), children=[
+            Node("/54", Atspi.Role.LIST_ITEM, TARGET, (105, 40, 90, 34)),
+            Node("/55", Atspi.Role.LIST_ITEM, TARGET, (105, 74, 90, 34))])
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            dropdown("/1", SHOWN), dropdown("/5", SHOWN + (S.EXPANDED,), [popover])])
+        out = walk(root)
+        self.assertEqual(ids(out), ["1", "54", "55", "5"])
+        # the popover's items say they are in it
+        self.assertEqual([e.popup for e in out], ["", ":1.9/53", ":1.9/53", ""])
+
+    def test_chromium_select_list_is_a_popup(self):
+        # Chromium, open <select>: the "menu" reports a rect inside the
+        # combo box, its options lie below it.
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.COMBO_BOX, TARGET + (S.EXPANDED,), (39, 362, 72, 21), "Pick", children=[
+                Node("/2", Atspi.Role.MENU, SHOWN, (39, 362, 72, 11), children=[
+                    Node("/3", Atspi.Role.MENU_ITEM, TARGET, (40, 382, 56, 26), "Apfel")])])])
+        out = walk(root)
+        self.assertEqual(ids(out), ["3", "1"])
+        self.assertEqual([e.popup for e in out], [":1.9/2", ""])
+
+    def test_same_name_keeps_focusable(self):
+        # gtk_testapp: GTK4 MenuButton (non-focusable button around a
+        # focusable toggle button), tree row (list item around its
+        # expander button, 4 px smaller); a focusable outer one stays.
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.PUSH_BUTTON, SHOWN, (0, 0, 130, 34), "Menu", children=[
+                Node("/2", Atspi.Role.TOGGLE_BUTTON, TARGET, (0, 0, 130, 34), "Menu")]),
+            Node("/3", Atspi.Role.LIST_ITEM, SHOWN, (0, 40, 260, 22), "Folder", children=[
+                Node("/4", Atspi.Role.PUSH_BUTTON, TARGET, (0, 40, 256, 18), "Folder")]),
+            Node("/5", Atspi.Role.PAGE_TAB, TARGET, (0, 70, 100, 30), "Tab", children=[
+                Node("/6", Atspi.Role.PUSH_BUTTON, TARGET, (2, 72, 90, 20), "Tab")])])
+        self.assertEqual(ids(walk(root)), ["2", "4", "5"])
+
 
 # ---- fetch_tree against a fake bus ----
 
@@ -271,12 +325,12 @@ class FakeBus:
         raise AssertionError(f"fallback call {method} on {path}")
 
 
-def fetched_walk(root, prune_hidden=False):
+def fetched_walk(root, prune_hidden=False, inherit_disabled=False):
     bus = FakeBus(root)
     stats = ReadStats()
     frame = SimpleNamespace(app=SimpleNamespace(bus_name=":1.9"), path=root.path)
-    tree = fetch_tree(bus, frame, prune_hidden, stats)
-    return select_targets(tree, prune_hidden, stats), stats, bus
+    tree = fetch_tree(bus, frame, prune_hidden, stats, inherit_disabled)
+    return select_targets(tree, prune_hidden, stats, inherit_disabled=inherit_disabled), stats, bus
 
 
 class FetchTest(unittest.TestCase):
@@ -293,6 +347,10 @@ class FetchTest(unittest.TestCase):
         WalkTest.test_document_alone_is_a_target,
         WalkTest.test_closed_combo_box_options_skipped,
         WalkTest.test_tab_in_tab_list_stays_target,
+        WalkTest.test_gtk_disabled_container,
+        WalkTest.test_combo_box_rendering_not_walked,
+        WalkTest.test_same_name_keeps_focusable,
+        WalkTest.test_chromium_select_list_is_a_popup,
     ]
 
     def test_same_as_full_read(self):
@@ -300,11 +358,11 @@ class FetchTest(unittest.TestCase):
         import tests.test_reader as module
         original = module.walk
         try:
-            def via_fetch(root, prune_hidden=False, stats=None):
-                out, fetched_stats, _ = fetched_walk(root, prune_hidden)
+            def via_fetch(root, prune_hidden=False, stats=None, inherit_disabled=False):
+                out, fetched_stats, _ = fetched_walk(root, prune_hidden, inherit_disabled)
                 self.assertEqual(fetched_stats.fallbacks, 0)
                 full_stats = ReadStats()
-                self.assertEqual(out, original(root, prune_hidden, full_stats))
+                self.assertEqual(out, original(root, prune_hidden, full_stats, inherit_disabled))
                 self.assertEqual(fetched_stats.probes, full_stats.probes)
                 self.assertEqual((fetched_stats.nodes, fetched_stats.pruned),
                                  (full_stats.nodes, full_stats.pruned))

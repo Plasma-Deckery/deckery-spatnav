@@ -268,7 +268,72 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
 - **KWins eigenes Fenstermenü** (Fenster-Icon, Alt+F3): ein KWin-internes
   Fenster ohne AT-SPI-Inhalt — die KWin-Anwendung hat keine Kinder und
   sendet keine Events. Nicht lesbar.
-- Nicht getestet: Tastaturfokus.
+- Tastaturfokus: gemessen, siehe §12.
+- **GTK4-Testanwendung (2026-11-12)**, `tools/testdesk/gtk_testapp.py`
+  (GTK 4.22, Szenarien `gtk_*`) — alle gängigen Steuerelemente mit festen
+  Namen, deaktivierte, versteckte, drei Scroll-Container, Popover, Dialog:
+  - **Deaktivierte Container:** GTK4 meldet SENSITIVE pro Widget, nicht
+    geerbt — der Knopf in einem deaktivierten `Gtk.Frame` ist SENSITIVE,
+    nur die `grouping` des Frames nicht. Für GTK gilt jetzt: unter einem
+    Knoten ohne ENABLED/SENSITIVE ist alles deaktiviert
+    (`INHERIT_DISABLED_TOOLKITS`; andere Toolkits nicht geprüft, daher
+    nicht übertragen). Nebenbei: GTK macht die Frame-Beschriftung zum
+    Namen des Knopfes darin.
+  - **DropDown:** nicht fokussierbare `combo box` um einen `toggle button`
+    um ein fokussierbares, unbenanntes `panel` → vorher zwei Ziele (eins
+    unbenannt). Jetzt: die combo box ist Ziel (auch ohne FOCUSABLE),
+    was in ihrem eigenen Rechteck liegt, wird nicht betreten — nur ihre
+    Liste außerhalb.
+  - **Gleicher Name, andere Rolle:** MenuButton = nicht fokussierbarer
+    `button` um fokussierbaren `toggle button` (gleiches Rechteck);
+    Baumzeile = `list item` um den `button` ihres TreeExpanders (4 px
+    kleiner). Jetzt: ein gleichnamiges Ziel im Ziel zählt einmal — das
+    fokussierbare, sonst das äußere. (Eine Webseiten-`li` um einen
+    gleichnamigen Link behält so den Link.)
+  - **Popover** (MenuButton-Menü, Popover, DropDown-Liste) sind für KWin
+    eigene Popup-Fenster, für AT-SPI aber ein Kind des aufgeklappten
+    (EXPANDED) Widgets tief im Baum des Hauptfensters, in dessen
+    Koordinaten (inkl. ~3 px Schattenrand) und ohne
+    `state-changed:showing`. Vorher: Popup-Fenster nicht zugeordnet, die
+    Einträge im Hauptfenster vom Popup verdeckt → keine Ziele, nur ein
+    Umriss im Schattenrand. Jetzt markiert der Reader Elemente im Popup
+    eines EXPANDED-Knotens (`RawElement.popup`: Kind außerhalb des
+    Knotens, bzw. Liste einer combo box), und das Backend zeigt die
+    Gruppe im Popup-Fenster, in dem alle ihre Elemente liegen
+    (`_match_popovers`), platziert wie das Hauptfenster — ohne zweites
+    Einlesen. Popup offen → Einträge Ziel nach 0,5–0,9 s.
+  - **GTK4-Menüeinträge haben keinen Namen** (PopoverMenu: `labelled-by`
+    zeigt auf ein ungültiges Objekt, kein Label-Kind). DropDown-Einträge
+    ebenso, der Text steckt nur im Label-Kind. Nicht behoben (das
+    Backend liest Namen nur von Zielen).
+  - Modaler Dialog (`Gtk.Window`, modal, transient): eigenes normales
+    KWin-Fenster, eigener AT-SPI-Frame — funktionierte ohne Änderung.
+    Die Ziele des Hauptfensters neben dem Dialog bleiben Ziele (sichtbar,
+    GTK ignoriert Klicks darauf) — Sache der Bedien-Anwendung (§12).
+  - Scrollen (Viewport mit gemischten Widgets, ListBox, ListView-Baum mit
+    recycelten Zeilen) und Auf-/Zuklappen im Baum: funktionierte ohne
+    Änderung, Ziele folgen in ~1 s.
+  - GTK-Popups einer per `python3` gestarteten App haben in KWin die
+    Klasse `python3.14` — wie der Viewer. `ctl.check` erkennt den Viewer
+    jetzt an seiner PID-Datei, nicht an der Klasse (blendete sonst die
+    Popups aus der Verdeckungsprüfung aus).
+- **Chromium `<select>` offen (2026-11-12):** eigenes KWin-Popup-Fenster
+  mit leerem eigenem AT-SPI-Frame (Flatpak: nicht zuordenbar), die
+  Optionen stehen im Hauptbaum unter der combo box (ihr `menu` meldet ein
+  falsches 72×11-Rechteck *in* der combo box) in Seitenkoordinaten.
+  Einziges Event: `state-changed:expanded`. Vorher keine Ziele; jetzt
+  über denselben Weg wie GTK-Popover (expanded ist neu ein Inhalts-Event),
+  Optionen nach ~0,4–0,7 s Ziele des Popup-Fensters. Esc schloss die
+  Liste im Testdesktop nicht.
+- **Firefox zeichnet Popups teils im eigenen Fenster:** die offene
+  `<select>`-Liste und die Vorschlagsliste der Adressleiste sind keine
+  KWin-Fenster. Die Optionen werden Ziele, aber Seiten-Ziele **unter**
+  der Liste bleiben ebenfalls Ziele — Verdeckung innerhalb eines
+  Fensters kennt das Backend nicht (wie bei QML-Popups). Offen.
+  Die Vorschlagsliste öffnet sich beim Start mit fokussierter
+  Adressleiste und schluckt Klicks auf die Seite → im Wegwerf-Profil
+  abgeschaltet (`firefox.sh`). Firefox' Adressleiste ist eine
+  `combo box`.
 - KWin-Scripts: `frameGeometry` lässt sich nur aus QML-Scripts setzen
   (`Qt.rect`); einfache Scripts ignorieren die Zuweisung stillschweigend.
 
@@ -296,3 +361,70 @@ Backend, Eingabe und Bedienung sind getrennt:
 2. Mehrere Monitore: eine Overlay-Fläche pro Monitor im Frontend.
 3. Mindestgröße sichtbarer Teile (3-px-Splitter, §9) — Backend oder
    Bedien-Anwendung?
+
+## 12. Messung: Signale für Sondermodi (2026-11-12, nur gemessen)
+
+Frage (nicht entschieden): Bedien-Anwendungen müssen sofort wissen, ob
+ein Menü/Popup oder ein modaler Dialog offen ist, ein Textfeld den Fokus
+hat oder ein Regler/Zahlenfeld/eine Auswahlliste gewählt ist — getrennt
+vom langsamen Einlesen der Zielliste. Gemessen mit
+`tools/testdesk/mode_probe.py`: echte Eingabe über EIS
+(`eis_input.py` stempelt den Druck mit CLOCK_MONOTONIC, im Container
+dieselbe Uhr), Ankunft je Quelle in ms **nach dem Drücken** (Klick-
+Loslassen +80 ms, Taste +60 ms). Quellen: KWin-Script
+(`windowAdded/Removed/Activated` mit popup/modal/transient), AT-SPI
+(`state-changed:focused` gewonnen, `:expanded`, `:showing` popup-artiger
+Rollen, `window:activate`), Backend-`Changed`. Testdesktop unter
+Fremdlast; Spannen über zwei Läufe, erste Berührung einer App teils
+deutlich langsamer (Dolphin-Kontextmenü erstmals 650–750 ms).
+
+| Situation | Signal | GTK 4.22 (Testapp) | Qt Widgets (Dolphin) | Qt Quick (Systemeinst.) | Chromium 156 | Firefox 152 |
+|---|---|---|---|---|---|---|
+| Textfeld | focus + EDITABLE | ja, 2–6 ms (`text`/`password text`, MULTI_LINE) | ja, 16–20 ms (Suche); Adresszeile: erst `check box`, dann editierbare `combo box` 25 ms | Suchfeld: **kein Event** (Start-Fokus, Strg+F) | ja, 3–21 ms (`entry`, SINGLE/MULTI_LINE) | ja, 7–10 ms (`entry`) |
+| Regler | focus + Value | ja, 6–10 ms | – (keiner) | ja, 14 ms (nach `filler`-Fokus) | ja, 4–7 ms | ja, 6 ms |
+| Zahlenfeld | focus + Value | ja, 3–46 ms (`spin button`, EDITABLE) | – | **Fokus aufs innere `text`**, ohne Value, 83 ms | ja, 7–17 ms | ja, 6 ms |
+| Auswahlliste auf | expanded | combo box, 145–166 ms | – | – (keine) | 22–33 ms | 53 ms |
+|  | KWin-Popup | 180–230 ms | – | – | 110–160 ms (Klasse leer) | **keins** (im Fenster) |
+|  | focus in Liste | `list item` (unbenannt) | – | – | `menu item` 80–94 ms | `menu item` 36 ms |
+|  | Backend: Optionen Ziele | 650–890 ms | – | – | 390 ms | 280 ms (im Hauptfenster) |
+| Menü/Popover auf | expanded | äußerer `button`, 118–408 ms | – (keins) | – | – | – |
+|  | showing `popup menu` | – (keins) | 10–90 ms | 89 ms | – | – |
+|  | KWin-Popup | 130–460 ms | 32–95 ms | 133 ms | – | – |
+|  | Backend: Einträge Ziele | 525–1400 ms | 59–195 ms | 184 ms | – | – |
+| Modaler Dialog auf | KWin added+activated, `modal` | 121–299 ms, modal ✓ | 124 ms, modal ✓ | – | **nichts** (`<dialog>.showModal()`) | **nichts** |
+|  | AT-SPI | `window:activate` des Dialog-Frames mit MODAL, 143–345 ms | nur Fokus ins Feld, 139 ms | – | nur Fokus ins Feld, 100 ms | nur Fokus ins Feld, 88 ms |
+|  | Backend: Dialog-Ziele | 261–368 ms | 209 ms | – | 296 ms | 292 ms |
+| Popup/Dialog zu | KWin removed | 8–125 ms | 6–35 ms | 9 ms | 95 ms | – |
+|  | expanded=0 / showing=0 | 5–14 ms | 4–15 ms | 7 ms | 115 ms | 86 ms (`window` showing=0) |
+| Tab-Taste | focus | 13–16 ms | – | – | **kein Event** (2×) | 22 ms |
+
+Immer sofort (0 ms, lokal): die **Rolle des gewählten Ziels** aus der
+Zielliste — `text`/`entry`/`password text`, `slider`, `spin button`,
+`combo box`; Menüknöpfe sind uneinheitlich (`toggle button` in GTK,
+`push button menu` in Qt, `button` „Firefox"); HAS_POPUP stünde nur in
+den Zuständen, die das Backend nicht veröffentlicht. Bei Qt Quick ist die
+Rolle der einzige Hinweis aufs Zahlenfeld (Fokus landet aufs Kind).
+
+Zuverlässigkeit der Zustände:
+- **EDITABLE**: alle fünf bei Textfeldern; Interfaces taugen nicht als
+  Ersatz (Chromium: kein EditableText; Firefox: EditableText auch an
+  Knöpfen).
+- **FOCUSED**: kommt überall als Event, aber oft als Kette — Qt Quick
+  fokussiert erst einen `filler` (FocusScope), Dolphin bei Strg+L erst
+  einen `check box`; der letzte Fokus eines Schubs (~25 ms) zählt.
+  Lücken: Systemeinstellungen-Suchfeld, Chromium bei Tab.
+- **EXPANDED**: GTK (äußerer Knopf bzw. combo box), Chromium und Firefox
+  (combo box); Qt nie — dort zeigt `showing` der `popup menu` das Menü an.
+- **Value** (min/aktuell/max): GTK, Chromium, Firefox, Qt Quick am
+  Regler; nicht am fokussierten Kind eines Qt-Quick-Zahlenfelds.
+- **MODAL**: am GTK-Dialog-Frame und als KWin-`modal` (GTK, Qt); Web-
+  Dialoge (`showModal`) liefern gar kein Fenster-Signal.
+- Das Nachfragen von Rolle/Zuständen/Value pro Event kostet synchron
+  2–150 ms (erste Berührung einer App bis 400 ms) — ein Konsument muss
+  das asynchron/gebündelt tun oder sich auf die Event-Rolle beschränken.
+
+Lesart: Fokus-Events sind mit 2–20 ms die schnellste Quelle für
+Text/Regler/Zahlenfeld; KWin-Fenster für Popups/Dialoge (30–300 ms) sind
+toolkit-unabhängig, decken aber Firefox-Listen und Web-Dialoge nicht ab;
+die Backend-Zielliste folgt 0,2–1,4 s später. Rohdaten:
+`mode_probe.py … --json`.

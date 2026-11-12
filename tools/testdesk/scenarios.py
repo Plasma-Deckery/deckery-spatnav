@@ -254,6 +254,67 @@ def scenario_chromium():
     return f"ok, page scroll picked up after {page_s:.1f}s, list scroll after {list_s:.1f}s"
 
 
+def scenario_browser_select(cls="org.chromium.Chromium"):
+    """An open <select> (page.html or controls.html): its options become
+    targets, and go away once one is chosen. Chromium shows them in a
+    KWin popup window, but reads them into the main window's tree in page
+    coordinates and sends only an expanded event; they must be targets of
+    the popup window. Firefox 152 draws the list inside its own window
+    (test desktop 2026-11-12): the options are targets of the main window,
+    and what lies under the list stays a target too — no occlusion inside
+    a window is known to the backend (reported, not failed)."""
+    if not has_window(cls):
+        return f"skipped (not running: {cls})"
+    ctl.kwin_raise(cls)
+    ctl.kwin_move(cls, 60, 30, 1000, 660)
+    # Raised, Firefox may focus its address bar and open the suggestions
+    # over the page: click empty page space first.
+    eis("click", 60 + 900, 30 + 600)
+    _, items = settle(timeout_s=8)
+    win = window_id(cls)
+    # the lowest one: Firefox's address bar is a combo box too
+    combo = sorted((e for e in items if e["window"] == win and e["role"] == "combo box"),
+                   key=lambda e: -e["rect"][1])
+    expect(combo, "no <select> (combo box) target")
+    before = {w["id"] for w in _popups()} | {e["id"] for e in items}
+    t0 = time.monotonic()
+    eis("click", *combo[0]["target"])
+    popup = None
+    deadline = time.monotonic() + 1.5
+    while popup is None and time.monotonic() < deadline:
+        popup = next((w for w in _popups() if w["id"] not in before), None)
+    owner = popup["id"] if popup else win
+    options = lambda it: [e for e in it if e["window"] == owner and e["id"] not in before
+                          and e["role"] in ("menu item", "list item", "option")]
+    items = wait_for(lambda it: len(options(it)) >= 2, 4)
+    latency = time.monotonic() - t0
+    screenshot(f"select-{cls}")
+    expect(len(options(items)) >= 2, f"options not targets of the {'popup' if popup else 'window'}: "
+                                     f"{[(e['role'], e['name']) for e in items if e['window'] == owner][:6]}")
+    if popup:
+        area = Rect(*popup["frame"])
+        under = [e for e in targets_in(items, area) if e["window"] != popup["id"]]
+        expect(not under, f"targets under the open <select>: {[(e['role'], e['name']) for e in under[:4]]}")
+        note = "in a popup window"
+    else:
+        listed = options(items)
+        area = Rect(min(e["rect"][0] for e in listed), min(e["rect"][1] for e in listed), 1, 1)
+        area = Rect(area.x, area.y, max(e["rect"][0] + e["rect"][2] for e in listed) - area.x,
+                    max(e["rect"][1] + e["rect"][3] for e in listed) - area.y)
+        under = [e["name"] for e in targets_in(items, area) if e not in listed]
+        note = f"in the window, still targets under the list: {under}"
+    first = min(options(items), key=lambda e: e["rect"][1])
+    eis("click", *first["target"])
+    items = wait_for(lambda it: not options(it), 4)
+    expect(not options(items), "option targets remain after choosing")
+    if popup:
+        # KWin keeps the closed popup in its stacking order for the close animation
+        deadline = time.monotonic() + 2
+        while any(w["id"] == popup["id"] for w in _popups()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    return f"options after {latency:.1f}s, {note}"
+
+
 def scenario_firefox():
     """Firefox Flatpak with a throwaway profile (tools/testdesk/firefox.sh,
     page.html). Its toolbar buttons are targets though never FOCUSABLE,
@@ -620,7 +681,7 @@ def scenario_coverage():
     with_targets = {e["window"] for e in items}
     # bottom → top; panels cover too, the viewer overlay doesn't
     stack = [w for w in ctl.kwin_eval(ctl._WINDOWS_JS)
-             if not w["minimized"] and w["cls"] != "python3.14"]
+             if not w["minimized"] and not ctl.is_viewer(w)]
     windows = [w for w in stack if w["normal"]]
     # fully covered windows legitimately have none
     regions = {}
@@ -640,6 +701,242 @@ def scenario_coverage():
     return f"{len(windows)} windows covered"
 
 
+# ---- GTK4 test app (tools/testdesk/gtk_testapp.sh) ----
+
+GTK_APP = "org.deckery.TestApp"
+GTK_TARGETS = {  # name → role, as GTK 4.22 reports them
+    "Aktiver Knopf": "button", "Umschaltknopf": "toggle button", "Schalter": "switch",
+    "Häkchen": "check box", "Radio Eins": "radio button", "Radio Zwei": "radio button",
+    "Radio Drei": "radio button", "Schieberegler": "slider", "Zahlenfeld": "spin button",
+    "Textfeld": "text", "Passwortfeld": "password text", "Mehrzeiliger Text": "text",
+    "Menü öffnen": "toggle button", "Popover öffnen": "toggle button", "Dialog öffnen": "button",
+    "Ein Link": "link", "Scrollknopf 1": "button", "Listenzeile 1": "list item", "Ordner 1": "button",
+}
+# Disabled (insensitive, also by an insensitive Gtk.Frame, which GTK4
+# makes the frame's label the button's name) or hidden.
+GTK_NOT_TARGETS = ("Deaktivierter Knopf", "Schalter deaktiviert", "Häkchen deaktiviert",
+                   "Textfeld deaktiviert", "Versteckter Knopf", "Deaktivierte Gruppe",
+                   "Knopf in deaktivierter Gruppe")
+
+
+def _gtk_setup():
+    if not has_window(GTK_APP):
+        return None
+    ctl.kwin_raise(GTK_APP)
+    ctl.kwin_move(GTK_APP, 31, 5)
+    _, items = settle()
+    return window_id(GTK_APP), items
+
+
+def _popups():
+    return [w for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["popup"]]
+
+
+def scenario_gtk_controls():
+    """Every kind of GTK4 control is one target with its role; disabled
+    ones (also inside an insensitive frame) and hidden ones are none; the
+    drop-down is one combo box (not its toggle button and the unnamed panel
+    inside); menu button and tree row are one target each (GTK4 nests a
+    same-named focusable button in them)."""
+    setup = _gtk_setup()
+    if setup is None:
+        return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
+    gtk_id, items = setup
+    screenshot("gtk-controls")
+    mine = [e for e in items if e["window"] == gtk_id]
+    for name, role in GTK_TARGETS.items():
+        found = by_name(mine, name)
+        expect(found, f"{name!r} not a target")
+        expect(len(found) == 1, f"{name!r} is {len(found)} targets: {[e['role'] for e in found]}")
+        expect(found[0]["role"] == role, f"{name!r} is a {found[0]['role']}, expected {role}")
+    for name in GTK_NOT_TARGETS:
+        expect(not by_name(mine, name), f"{name!r} is a target (disabled or hidden)")
+    combos = [e for e in mine if e["role"] == "combo box"]
+    expect(len(combos) == 1 and combos[0]["name"] in ("Apfel", "Birne", "Kirsche", "Pflaume"),
+           f"drop-down: {[(e['role'], e['name']) for e in combos]}")
+    inside = [e for e in mine if e is not combos[0] and Rect(*e["rect"]).intersect(Rect(*combos[0]["rect"]))]
+    expect(not inside, f"targets inside the drop-down: {[(e['role'], e['name']) for e in inside]}")
+    unnamed = [e for e in mine if not e["name"]]
+    expect(not unnamed, f"unnamed targets: {[(e['role'], e['rect']) for e in unnamed[:4]]}")
+    return f"{len(mine)} targets"
+
+
+def _gtk_scroll(items, gtk_id, first, last, clicks):
+    """Scroll the container showing `first` until `last` is a target."""
+    start = by_name(items, first)
+    expect(start, f"{first!r} not a target before scrolling")
+    expect(not by_name(items, last), f"{last!r} a target before scrolling")
+    x, y = start[0]["target"]
+    # Wheel clicks right after the pointer jumps into another scrolled
+    # window partly went to the previous one: hover first.
+    eis("move", x, y)
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    eis("scroll", x, y, clicks)
+    items = wait_for(lambda it: by_name(it, last) and not by_name(it, first), 6)
+    took = time.monotonic() - t0
+    prefix = first.rsplit(" ", 1)[0]
+    expect(by_name(items, last) and not by_name(items, first),
+           f"scrolling to {last!r} not picked up within 6 s (targets now: "
+           f"{[e['name'] for e in items if e['name'].startswith(prefix)][-3:]})")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"after scrolling to {last!r}, {len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+    outside = [e for e in items if e["window"] == gtk_id and any(
+        not Rect(*p).intersect(window_frame(GTK_APP)) for p in e["visible"])]
+    expect(not outside, f"targets outside the window: {[e['name'] for e in outside[:4]]}")
+    # GTK4 drops some of a fast burst of wheel clicks: overshoot back
+    eis("scroll", x, y, -2 * clicks)
+    items = wait_for(lambda it: by_name(it, first), 6)
+    expect(by_name(items, first), f"scrolling back to {first!r} not picked up")
+    return items, took
+
+
+def scenario_gtk_scroll():
+    """The three GTK4 scroll containers: mixed widgets in a viewport, a
+    ListBox (widget rows) and a ListView tree (recycled rows). Scrolled to
+    the end and back with the wheel, targets follow and stay fresh."""
+    setup = _gtk_setup()
+    if setup is None:
+        return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
+    gtk_id, items = setup
+    times = []
+    for first, last, clicks in (("Scrollknopf 1", "Scrollknopf ganz unten", 20),
+                                ("Listenzeile 1", "Listenzeile 40", 20),
+                                ("Ordner 1", "Ordner 30", 20)):
+        items, took = _gtk_scroll(items, gtk_id, first, last, clicks)
+        times.append(f"{last} {took:.1f}s")
+    screenshot("gtk-scrolled-back")
+    return ", ".join(times)
+
+
+def scenario_gtk_tree():
+    """Expanding a tree row (click on its expander arrow) adds its children
+    as targets; collapsing removes them."""
+    setup = _gtk_setup()
+    if setup is None:
+        return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
+    _, items = setup
+    row = by_name(items, "Ordner 1")
+    expect(row, "'Ordner 1' not a target")
+    x, y, _, h = row[0]["rect"]
+    eis("click", x + 8, y + h / 2)
+    items = wait_for(lambda it: by_name(it, "Eintrag 1.1"), 6)
+    screenshot("gtk-tree-expanded")
+    expect(by_name(items, "Eintrag 1.1"), "children of 'Ordner 1' not targets after expanding")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"after expanding, {len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+    eis("click", x + 8, y + h / 2)
+    items = wait_for(lambda it: not by_name(it, "Eintrag 1.1"), 6)
+    expect(not by_name(items, "Eintrag 1.1"), "children of 'Ordner 1' still targets after collapsing")
+    return "ok"
+
+
+def _gtk_open_popup(items, opener, expected, count):
+    """Click `opener`; one new KWin popup window must hold `count` targets
+    (named `expected`, where GTK names them), nothing under it may stay a
+    target. Returns (items, popup window)."""
+    before = {w["id"] for w in _popups()}
+    t0 = time.monotonic()
+    found = [e for e in items if e["role"] == "combo box"] if opener == "combo box" else by_name(items, opener)
+    expect(found, f"{opener!r} not a target")
+    eis("click", *found[0]["target"])
+    popup = None
+    deadline = time.monotonic() + 3
+    while popup is None and time.monotonic() < deadline:
+        popup = next((w for w in _popups() if w["id"] not in before), None)
+    expect(popup, f"no KWin popup window after clicking {opener!r}")
+    mine = lambda it: [e for e in it if e["window"] == popup["id"]]
+    items = wait_for(lambda it: len(mine(it)) >= count and all(by_name(mine(it), n) for n in expected), 3)
+    latency = time.monotonic() - t0
+    expect(len(mine(items)) >= count, f"{opener!r}: popup has {len(mine(items))} targets, expected {count}")
+    for name in expected:
+        expect(by_name(mine(items), name), f"{name!r} not a target in the popup of {opener!r}")
+    frame = Rect(*popup["frame"])
+    outside = [e for e in mine(items) if any(not Rect(*p).intersect(frame) for p in e["visible"])]
+    expect(not outside, f"popup targets outside the popup: {[e['name'] for e in outside]}")
+    under = [e for e in targets_in(items, frame) if e["window"] != popup["id"]]
+    expect(not under, f"targets under the popup: {[(e['role'], e['name']) for e in under[:4]]}")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"with {opener!r} open: {failures[:3]}")
+    return items, popup, latency
+
+
+def _gtk_closed(popup):
+    items = wait_for(lambda it: not any(e["window"] == popup["id"] for e in it), 3)
+    expect(not any(e["window"] == popup["id"] for e in items), "popup targets remain after closing it")
+    # KWin keeps the closed popup in its stacking order for the close animation
+    deadline = time.monotonic() + 2
+    while any(w["id"] == popup["id"] for w in _popups()) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return items
+
+
+def scenario_gtk_popups():
+    """GTK4 popovers live deep in the main window's tree (children of the
+    expanded widget) but KWin shows each as its own popup window: menu
+    button (PopoverMenu; GTK 4.22 gives its items no names), popover with
+    widgets, drop-down list. Their items are targets of the popup window,
+    gone once closed; choosing in the drop-down renames the combo box."""
+    setup = _gtk_setup()
+    if setup is None:
+        return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
+    _, items = setup
+    results = []
+    items, popup, latency = _gtk_open_popup(items, "Menü öffnen", (), 4)
+    screenshot("gtk-menu")
+    results.append(f"menu {latency:.1f}s")
+    eis("key", "esc")
+    items = _gtk_closed(popup)
+
+    items, popup, latency = _gtk_open_popup(
+        items, "Popover öffnen", ("Knopf im Popover", "Häkchen im Popover", "Feld im Popover"), 3)
+    screenshot("gtk-popover")
+    results.append(f"popover {latency:.1f}s")
+    eis("key", "esc")
+    items = _gtk_closed(popup)
+
+    items, popup, latency = _gtk_open_popup(items, "combo box", (), 4)
+    screenshot("gtk-dropdown")
+    results.append(f"drop-down {latency:.1f}s")
+    rows = sorted((e for e in items if e["window"] == popup["id"]), key=lambda e: e["rect"][1])
+    eis("click", *rows[1]["target"])
+    items = _gtk_closed(popup)
+    items = wait_for(lambda it: [e for e in it if e["role"] == "combo box" and e["name"] == "Birne"], 3)
+    expect([e for e in items if e["role"] == "combo box" and e["name"] == "Birne"],
+           f"combo box not renamed after choosing: {[e['name'] for e in items if e['role'] == 'combo box']}")
+    items, popup, _ = _gtk_open_popup(items, "combo box", (), 4)
+    rows = sorted((e for e in items if e["window"] == popup["id"]), key=lambda e: e["rect"][1])
+    eis("click", *rows[0]["target"])
+    _gtk_closed(popup)
+    wait_for(lambda it: [e for e in it if e["role"] == "combo box" and e["name"] == "Apfel"], 3)
+    return ", ".join(results)
+
+
+def scenario_gtk_dialog():
+    """A modal GTK4 dialog is its own normal KWin window: its controls are
+    targets, the main window's under it are not; closing it removes them.
+    (The main window's controls around it stay targets: visible, though
+    GTK ignores clicks on them while the dialog is open.)"""
+    setup = _gtk_setup()
+    if setup is None:
+        return "skipped (not running: tools/testdesk/gtk_testapp.sh)"
+    gtk_id, items = setup
+    eis("click", *by_name(items, "Dialog öffnen")[0]["target"])
+    items = wait_for(lambda it: by_name(it, "OK") and by_name(it, "Abbrechen"), 4)
+    screenshot("gtk-dialog")
+    expect(by_name(items, "OK") and by_name(items, "Abbrechen") and by_name(items, "Dialogfeld"),
+           "dialog controls not targets")
+    dialog_id = by_name(items, "OK")[0]["window"]
+    expect(dialog_id != gtk_id, "dialog controls belong to the main window")
+    dialog = next(Rect(*w["frame"]) for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["id"] == dialog_id)
+    under = [e for e in targets_in(items, dialog) if e["window"] == gtk_id]
+    expect(not under, f"main window targets under the dialog: {[e['name'] for e in under[:4]]}")
+    eis("click", *by_name(items, "Abbrechen")[0]["target"])
+    items = wait_for(lambda it: not by_name(it, "OK"), 4)
+    expect(not by_name(items, "OK"), "dialog controls remain after closing it")
+    return "ok"
+
+
 def scenario_invariants():
     failures = ctl.check(verbose=False)
     expect(not failures, "; ".join(failures[:5]))
@@ -656,7 +953,14 @@ SCENARIOS = {
     "launcher": scenario_launcher,
     "hung": scenario_hung,
     "chromium": scenario_chromium,
+    "chromium_select": scenario_browser_select,
     "firefox": scenario_firefox,
+    "firefox_select": lambda: scenario_browser_select("org.mozilla.firefox"),
+    "gtk_controls": scenario_gtk_controls,
+    "gtk_scroll": scenario_gtk_scroll,
+    "gtk_tree": scenario_gtk_tree,
+    "gtk_popups": scenario_gtk_popups,
+    "gtk_dialog": scenario_gtk_dialog,
     "desktop_icons": scenario_desktop_icons,
     "desktops": scenario_desktops,
     "multimonitor": scenario_multimonitor,

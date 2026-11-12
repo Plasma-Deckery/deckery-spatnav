@@ -35,8 +35,8 @@ from vendor.orca_ax.ax_object import AXObject
 
 from .atspi_bus import ACCESSIBLE, COMPONENT, COORD_TYPE_WINDOW, NULL_PATH, PROPERTIES, shared_bus
 from .atspi_frames import element_id
-from .eligibility import (EXPANDED, SHOWING, VISIBLE, is_menu_item_candidate, is_relevant, states_from_bits,
-                          states_from_state_set, suppress_container)
+from .eligibility import (EXPANDED, FOCUSABLE, SHOWING, VISIBLE, is_enabled, is_menu_item_candidate, is_relevant,
+                          states_from_bits, states_from_state_set, suppress_container)
 from .geometry import Rect
 from .menu_repair import repair_menu_layout
 
@@ -67,6 +67,13 @@ WEB_DOCUMENT_ROLE = "document web"
 # 2026-11-12, inside a non-showing "menu").
 CLOSED_COMBO_POPUP_ROLES = frozenset(("menu", "list", "list box"))
 
+# One control drawn as several accessibles: everything a combo box has
+# inside its own box is its rendering (test desktop 2026-11-12,
+# gtk_testapp: a GTK4 DropDown is a combo box around a toggle button
+# around a focusable, unnamed panel); only what lies outside — its popup
+# list — is walked.
+COMBO_BOX_ROLE = "combo box"
+
 READER_MODE = os.environ.get("DECKERY_READER", "async")
 
 
@@ -86,6 +93,13 @@ class RawElement:
     # clips are in the web's coordinate space, the clips before it are not.
     web: bool = False
     web_clips: int = 0
+    # Inside the popup of an EXPANDED node (a child of it lying outside
+    # it, or a combo box's list): that child's id. Test desktop
+    # 2026-11-12: GTK4 popovers (menu button, drop-down) and Chromium's
+    # <select> list are subtrees of the main window, in its coordinates,
+    # while KWin shows them as their own popup window
+    # (backend._match_popovers).
+    popup: str = ""
 
     @property
     def accessible(self):
@@ -136,6 +150,11 @@ def _same_rect(a, b, tolerance=1.0):
             and abs(a.w - b.w) <= tolerance and abs(a.h - b.h) <= tolerance)
 
 
+def _contains(outer, inner, tolerance=1.0):
+    return (inner.x >= outer.x - tolerance and inner.y >= outer.y - tolerance
+            and inner.x2 <= outer.x2 + tolerance and inner.y2 <= outer.y2 + tolerance)
+
+
 def _inside(rect, clips):
     for c in clips:
         rect = rect.intersect(c)
@@ -150,6 +169,13 @@ def _inside(rect, clips):
 # assumed for other toolkits yet (Firefox reports visible toolbar buttons
 # as not showing, see ATSPI_LIMITATIONS.md).
 PRUNE_NOT_SHOWING_TOOLKITS = frozenset(("qt",))
+# Toolkits that report SENSITIVE per widget, not inherited from an
+# insensitive container: everything under a node that is neither ENABLED
+# nor SENSITIVE is disabled. Test desktop 2026-11-12, gtk_testapp: the
+# button in an insensitive Gtk.Frame is SENSITIVE, only the frame's
+# "grouping" is not. Not assumed elsewhere yet: other toolkits weren't
+# checked for containers without either state.
+INHERIT_DISABLED_TOOLKITS = frozenset(("gtk",))
 
 
 # ---- top-down rules, shared by the walk and fetch_tree ----
@@ -200,18 +226,27 @@ def _descent(role, states, depth, prune_hidden):
 
 # ---- the walk ----
 
-def select_targets(root, prune_hidden, stats, rebase=False):
+def _children_rect_needed(role, states):
+    """Whether a node's children are each placed against its rect: the
+    combo box rule and popups (RawElement.popup)."""
+    return role == COMBO_BOX_ROLE or EXPANDED in states
+
+
+def select_targets(root, prune_hidden, stats, rebase=False, inherit_disabled=False):
     """The targets under root. Nodes provide id, role, states (set of
     Atspi.StateType ints), rect, name, children, alive and ref; the walk
     reads each only where it needs it (a LiveNode turns every first read
     into one libatspi call)."""
     out = []
 
-    def walk(node, clips, depth, target_ancestor=None, parent_role="", web_from=None):
+    def walk(node, clips, depth, target_ancestor=None, parent_role="", web_from=None, popup="",
+             disabled=False):
         """Returns True if node or a descendant produced an element.
-        target_ancestor: (role, rect) of the nearest ancestor that is itself
-        a target (eligibility is known pre-order from role + states).
-        web_from: number of clips outside the web document this node is in."""
+        target_ancestor: _Ancestor, the nearest ancestor that is itself a
+        target (eligibility is known pre-order from role + states).
+        web_from: number of clips outside the web document this node is in.
+        popup: id of the popup candidate this node is in.
+        disabled: under a disabled container (inherit_disabled)."""
         stats.nodes += 1
         role = node.role
         if _closed_combo_popup(role, parent_role):
@@ -231,8 +266,9 @@ def select_targets(root, prune_hidden, stats, rebase=False):
         # The root (window, popup) is never a target itself: test desktop
         # 2026-11-12, a Firefox context menu ("menu", SHOWING) became one
         # box around its own items.
-        relevant = depth > 0 and is_relevant(role, states, lambda: node.name)
-        if relevant and rect is None:
+        relevant = depth > 0 and not disabled and is_relevant(role, states, lambda: node.name)
+        place_children = _children_rect_needed(role, states)
+        if (relevant or place_children) and rect is None:
             rect = node.rect
         produced = False
         descent = _descent(role, states, depth, prune_hidden)
@@ -243,15 +279,31 @@ def select_targets(root, prune_hidden, stats, rebase=False):
         elif descent is MENU:
             produced = walk_menu(node, child_clips, depth)
         else:
-            child_ancestor = (role, rect) if relevant else target_ancestor
+            own = _Ancestor(role, rect, node.name, FOCUSABLE in states) if relevant else None
+            child_ancestor = own or target_ancestor
             as_parent = _role_for_children(role, states)
             probe = child_clips is not clips
+            child_disabled = disabled or (inherit_disabled and depth > 0 and not is_enabled(states))
             for child in node.children:
                 if probe:
                     stats.probes.append(Probe(child.id, child.rect, child.ref))
                     probe = False
+                child_popup = popup
+                if place_children:
+                    inside = child.rect.empty or _contains(rect, child.rect)
+                    # Chromium: the open <select>'s "menu" has a bogus
+                    # 72x11 rect inside the combo box, its items lie below.
+                    if EXPANDED in states and (not inside or role == COMBO_BOX_ROLE
+                                               and child.role in CLOSED_COMBO_POPUP_ROLES):
+                        child_popup = child.id
+                    elif role == COMBO_BOX_ROLE and inside:
+                        stats.pruned += 1
+                        continue
                 produced = walk(child, child_clips, depth + 1, child_ancestor,
-                                as_parent, web_from) or produced
+                                as_parent, web_from, child_popup, child_disabled) or produced
+            if own is not None and own.replaced:
+                # a focusable descendant stands for this control
+                return True
         if not relevant:
             return produced
         if produced and suppress_container(role, parent_role, lambda: node.name):
@@ -259,16 +311,28 @@ def select_targets(root, prune_hidden, stats, rebase=False):
         if rect.empty or not _inside(rect, clips):
             return produced
         name = node.name
-        if target_ancestor is not None and role == target_ancestor[0] and \
-                (not name or _same_rect(rect, target_ancestor[1])):
-            # One control, two targets — keep the outer one. Test desktop
-            # 2026-11-11: System Settings theme tiles (unnamed radio button
-            # inside radio button 'Breeze'); Plasma panel (button inside
-            # button with the same rect: launcher, tray icons, clock).
-            return produced
+        if target_ancestor is not None:
+            if role == target_ancestor.role and (not name or _same_rect(rect, target_ancestor.rect)):
+                # One control, two targets — keep the outer one. Test desktop
+                # 2026-11-11: System Settings theme tiles (unnamed radio button
+                # inside radio button 'Breeze'); Plasma panel (button inside
+                # button with the same rect: launcher, tray icons, clock).
+                return produced
+            if name and name == target_ancestor.name and _contains(target_ancestor.rect, rect):
+                # The same, with different roles — keep the focusable one,
+                # else the outer. Test desktop 2026-11-12, gtk_testapp: a
+                # GTK4 MenuButton is a non-focusable "button" around a
+                # focusable "toggle button"; a tree row is a "list item"
+                # around its TreeExpander's focusable "button" (4 px
+                # smaller), all with the same name.
+                if FOCUSABLE in states and not target_ancestor.focusable:
+                    target_ancestor.replaced = True
+                else:
+                    return produced
         out.append(RawElement(node.id, role, name, rect, clips, node.ref,
                               web=web_from is not None,
-                              web_clips=0 if web_from is None else len(clips) - web_from))
+                              web_clips=0 if web_from is None else len(clips) - web_from,
+                              popup=popup))
         return True
 
     def walk_menu(menu, clips, depth):
@@ -309,6 +373,15 @@ def select_targets(root, prune_hidden, stats, rebase=False):
         if base.x or base.y:
             out = [_rebase(e, base.x, base.y) for e in out]
     return out
+
+
+@dataclass
+class _Ancestor:
+    role: str
+    rect: Rect
+    name: str
+    focusable: bool
+    replaced: bool = False   # a focusable same-named descendant is the target instead
 
 
 def _rebase(element, dx, dy):
@@ -458,29 +531,30 @@ class _TreeFetch:
     only for possible targets; children are descended into as soon as the
     shared top-down rules allow."""
 
-    def __init__(self, bus, batch, root_acc, prune_hidden, stats):
+    def __init__(self, bus, batch, root_acc, prune_hidden, stats, inherit_disabled=False):
         self.bus = bus
         self.root_acc = root_acc
         self.stats = stats
         self._batch = batch
         self._prune_hidden = prune_hidden
+        self._inherit_disabled = inherit_disabled
 
     def start(self):
         acc = self.root_acc
         root = FetchedNode(self, acc.app.bus_name if acc.app else "", acc.path, ())
-        self._visit(root, (), 0, in_menu=False, parent_role="", probe=False)
+        self._visit(root, (), 0, in_menu=False, parent_role="", probe=False, disabled=False)
         return root
 
     def _call(self, node, iface, method, args, on_reply):
         self._batch.call(node.dest, node.path, iface, method, args, on_reply)
 
-    def _visit(self, node, clips, depth, in_menu, parent_role, probe):
+    def _visit(self, node, clips, depth, in_menu, parent_role, probe, disabled):
         waiting = [3]
 
         def step():
             waiting[0] -= 1
             if not waiting[0]:
-                self._decide(node, clips, depth, in_menu, parent_role, probe)
+                self._decide(node, clips, depth, in_menu, parent_role, probe, disabled)
 
         def on_role(reply):
             if reply is None:
@@ -540,17 +614,19 @@ class _TreeFetch:
 
         self._call(node, ACCESSIBLE, "GetChildren", None, on_children)
 
-    def _decide(self, node, clips, depth, in_menu, parent_role, probe):
+    def _decide(self, node, clips, depth, in_menu, parent_role, probe, disabled):
         role = node.role
         # Not walked: nothing but a scroll probe's rect is looked at.
         walked = not _closed_combo_popup(role, parent_role)
         asked_name = []
-        relevant = walked and depth > 0 and is_relevant(role, node.states, lambda: asked_name.append(True) or "")
+        relevant = walked and depth > 0 and not disabled and \
+            is_relevant(role, node.states, lambda: asked_name.append(True) or "")
         # Menu children: walk_menu looks at every child's rect, and names
         # the ones menu_repair reconstructs. The frame itself: rebasing
         # (popup menus) and the menu debug log.
         want_name = relevant or asked_name or in_menu or depth == 0
-        want_rect = want_name or probe or (walked and role in CLIPPING_ROLES)
+        want_rect = want_name or probe or (walked and (role in CLIPPING_ROLES
+                                                       or _children_rect_needed(role, node.states)))
         descend_after_rect = walked and role in CLIPPING_ROLES
         if want_name:
             def on_name(reply):
@@ -561,12 +637,12 @@ class _TreeFetch:
             def on_rect(reply):
                 node._rect = Rect(*reply[0]) if reply else Rect(0, 0, 0, 0)
                 if descend_after_rect:
-                    self._descend(node, clips, depth)
+                    self._descend(node, clips, depth, disabled)
             self._call(node, COMPONENT, "GetExtents", _WINDOW_COORDS, on_rect)
         if walked and not descend_after_rect:
-            self._descend(node, clips, depth)
+            self._descend(node, clips, depth, disabled)
 
-    def _descend(self, node, clips, depth):
+    def _descend(self, node, clips, depth, disabled=False):
         child_clips = clips
         if node.role in CLIPPING_ROLES:
             child_clips = _child_clips(node.role, node._rect, clips)
@@ -580,19 +656,23 @@ class _TreeFetch:
         in_menu = descent is MENU
         as_parent = "" if in_menu else _role_for_children(node.role, node.states)
         probe = not in_menu and child_clips is not clips
+        placed = not in_menu and _children_rect_needed(node.role, node.states)
+        if not in_menu:
+            disabled = disabled or (self._inherit_disabled and depth > 0 and not is_enabled(node.states))
         node._children = []
         for index, ref in enumerate(node.child_refs):
             if ref is None:
                 continue  # libatspi skips null references too
             child = FetchedNode(self, ref[0], ref[1], node.index_path + (index,))
             node._children.append(child)
-            self._visit(child, child_clips, depth + 1, in_menu, as_parent, probe)
+            self._visit(child, child_clips, depth + 1, in_menu, as_parent, probe or placed,
+                        disabled and not in_menu)
             probe = False
 
 
-def fetch_tree(bus, frame, prune_hidden, stats):
+def fetch_tree(bus, frame, prune_hidden, stats, inherit_disabled=False):
     with bus.batch() as batch:
-        fetch = _TreeFetch(bus, batch, frame, prune_hidden, stats)
+        fetch = _TreeFetch(bus, batch, frame, prune_hidden, stats, inherit_disabled)
         root = fetch.start()
         batch.run()
     stats.calls = batch.calls
@@ -608,12 +688,13 @@ def read_window(frame, toolkit="", mode=None, rebase=False):
         return _read_compare(frame, toolkit, rebase)
     stats = ReadStats()
     prune_hidden = (toolkit or "").lower() in PRUNE_NOT_SHOWING_TOOLKITS
+    inherit_disabled = (toolkit or "").lower() in INHERIT_DISABLED_TOOLKITS
     t0 = time.monotonic()
     bus = shared_bus() if mode != "sync" else None
-    root = fetch_tree(bus, frame, prune_hidden, stats) if bus else LiveNode(frame)
+    root = fetch_tree(bus, frame, prune_hidden, stats, inherit_disabled) if bus else LiveNode(frame)
     # Walking a timed-out fetch would ask for the missing values one by
     # one, each waiting out another timeout.
-    out = [] if stats.timed_out else select_targets(root, prune_hidden, stats, rebase)
+    out = [] if stats.timed_out else select_targets(root, prune_hidden, stats, rebase, inherit_disabled)
     stats.ms = 1000 * (time.monotonic() - t0)
     return out, stats
 

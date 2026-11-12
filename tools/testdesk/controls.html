@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Deckery Steuerelemente</title>
+<style>body{font:16px sans-serif;margin:20px} .row{display:flex;gap:12px;margin:10px 0;align-items:center}</style></head><body>
+<h1>Deckery Steuerelemente</h1>
+<!-- Same names as tools/testdesk/gtk_testapp.py, for mode_probe.py -->
+<div class="row"><button id="b1">Aktiver Knopf</button><button disabled>Deaktivierter Knopf</button><a href="#x">Ein Link</a></div>
+<div class="row"><input aria-label="Textfeld" placeholder="hier tippen"><input type="password" aria-label="Passwortfeld"></div>
+<div class="row"><textarea aria-label="Mehrzeiliger Text" rows="3">Erste Zeile
+Zweite Zeile</textarea></div>
+<div class="row"><input type="range" aria-label="Schieberegler" min="0" max="100" value="30">
+<input type="number" aria-label="Zahlenfeld" min="0" max="100" value="5"></div>
+<div class="row"><select aria-label="Auswahlliste"><option>Apfel</option><option>Birne</option><option>Kirsche</option></select>
+<label><input type="checkbox"> Häkchen</label></div>
+<div class="row"><button onclick="document.getElementById('d').showModal()">Dialog öffnen</button></div>
+<dialog id="d"><p>Ein modaler Dialog.</p><input aria-label="Dialogfeld">
+<button onclick="this.closest('dialog').close()">Abbrechen</button><button onclick="this.closest('dialog').close()">OK</button></dialog>
+</body></html>

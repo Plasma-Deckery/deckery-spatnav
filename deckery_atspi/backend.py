@@ -31,7 +31,7 @@ from .atspi_bus import shared_bus
 from .atspi_frames import POPUP_ROLES, element_id, frame_info, list_frames
 from .compose import compose_window
 from .geometry import Rect
-from .matching import Match, match_windows
+from .matching import Match, match_windows, pick_popover
 from .placement import placement_for
 from .reader import live_rects, read_window
 from .scene import LAYER_OVERLAY
@@ -83,6 +83,10 @@ _CONTENT_EVENTS = (
     "object:children-changed",
     "object:state-changed:showing",
     "object:state-changed:visible",
+    # Chromium sends nothing else when a <select> opens (test desktop
+    # 2026-11-12): its list is read into the main window and shown in
+    # its popup window (_match_popovers).
+    "object:state-changed:expanded",
     "object:bounds-changed",
     "object:property-change:accessible-name",
 )
@@ -128,6 +132,7 @@ class Backend:
         self._last_frames = []  # the last list_frames result, kept when self.frames is reset
         self._embedded_popups = {}  # popup window_id -> FrameInfo (embedded)
         self._embedded_tried = {}  # popup window_id -> monotonic time of the last search
+        self._popovers_logged = set()
 
     # ---- inputs ----
 
@@ -373,6 +378,38 @@ class Backend:
             matches[window.id] = Match(len(self.frames_all) - 1, "embedded-popup")
             del unmatched[window.id]
 
+    def _match_popovers(self, scene, regions, by_id):
+        """Popup windows without content of their own, shown for a popup
+        read into their main window (RawElement.popup): GTK4 popovers
+        (children of the expanded menu button / drop-down) and Chromium's
+        open <select> list (its own frame is empty), test desktop
+        2026-11-12. A popup is the one whose elements all lie inside the
+        KWin popup window. Returns {popup window id: (main window id,
+        popup id)}."""
+        out = {}
+        for window_id in regions:
+            popup = by_id[window_id]
+            if "popupWindow" not in popup.flags or self._raw.get(window_id, (0, 0, ()))[2]:
+                continue
+            area = popup.client or popup.frame
+            mains = sorted((w for w in scene.windows if w.pid == popup.pid and w.id in self.matches
+                            and w.id in self._raw and "popupWindow" not in w.flags),
+                           key=lambda w: -(w.frame.area if w.frame else 0))
+            for main in mains:
+                frame = self.frames_all[self.matches[main.id].frame_index]
+                place = placement_for(scene, main, frame.toolkit, frame.toolkit_version)
+                groups = {}
+                for e in self._raw[main.id][2]:
+                    if e.popup:
+                        groups.setdefault(e.popup, []).append(place.to_screen(e.rect, e.web))
+                for _, taken in out.values():
+                    groups.pop(taken, None)
+                popup_id = pick_popover(area, groups, EMBEDDED_POPUP_TOLERANCE)
+                if popup_id:
+                    out[window_id] = (main.id, popup_id)
+                    break
+        return out
+
     def _find_embedded_popup(self, scene, popup, windows, matches):
         """The SHOWING child of a same-pid main window's frame that lies
         exactly where KWin shows the popup."""
@@ -425,6 +462,7 @@ class Backend:
         by_id = {w.id: w for w in scene.windows}
         elements = []
         reads = []
+        to_compose = []
         for window_id, region in regions.items():
             window = by_id[window_id]
             match = self.matches.get(window_id)
@@ -478,8 +516,26 @@ class Backend:
             elif cached[1] != size and not silent:
                 self._dirty_windows.add(window_id)
                 self._schedule_update()
+            to_compose.append((window_id, window, frame, region))
+
+        popovers = self._match_popovers(scene, regions, by_id)
+        shown_elsewhere = {}  # main window id -> popup ids composed into their popup window
+        for main_id, popup_id in popovers.values():
+            shown_elsewhere.setdefault(main_id, set()).add(popup_id)
+        for window_id, window, frame, region in to_compose:
             raw = self._raw[window_id][2]
+            if window_id in shown_elsewhere:
+                raw = [e for e in raw if e.popup not in shown_elsewhere[window_id]]
             elements.extend(compose_window(raw, window_id, placement_for(scene, window, frame.toolkit, frame.toolkit_version), region))
+        for window_id, (main_id, popup_id) in popovers.items():
+            if window_id not in self._popovers_logged:
+                self._log(f"[popup] kwin {by_id[window_id].frame} ← popup {popup_id} of {main_id[:9]} (popover)")
+            main = by_id[main_id]
+            frame = self.frames_all[self.matches[main_id].frame_index]
+            raw = [e for e in self._raw[main_id][2] if e.popup == popup_id]
+            # placed as in the main window: the popup is in its coordinates
+            elements.extend(compose_window(raw, window_id, placement_for(scene, main, frame.toolkit, frame.toolkit_version), regions[window_id]))
+        self._popovers_logged = set(popovers)
 
         for window_id in list(self._raw):
             if window_id not in by_id:

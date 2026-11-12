@@ -74,7 +74,7 @@ def states_from_state_set(state_set):
     return frozenset(int(s) for s in state_set.get_states())
 
 
-def _is_enabled(states):
+def is_enabled(states):
     # Test desktop 2026-11-11, Flatseal (GTK4/libadwaita): GTK4 never sets
     # ENABLED, only SENSITIVE — every GTK4 widget looked disabled.
     return ENABLED in states or SENSITIVE in states
@@ -88,12 +88,12 @@ def is_relevant(role_name, states, get_name):
     if role_name in NEVER_RELEVANT_ROLES:
         return False
     is_showing = SHOWING in states
-    is_enabled = _is_enabled(states)
+    enabled = is_enabled(states)
     # v2, real desktop 2026-11-12: Firefox 152's menu-bar menus used to be
     # targets regardless of SHOWING (an old prototype rule); they are
     # SHOWING exactly while the menu bar is, and the hidden one left its
     # File/Edit/… outlines over the tab strip.
-    if not (is_showing and is_enabled):
+    if not (is_showing and enabled):
         return False
     # Orca's AXUtilitiesState.is_focusable also counts FOCUSED.
     if FOCUSABLE in states or FOCUSED in states:
@@ -114,6 +114,10 @@ CLICKABLE_WITHOUT_FOCUS_ROLES = frozenset((
     "list item", "table cell", "tree item",
     "menu", "menu item", "check menu item", "radio menu item",
     "button", "push button", "toggle button",
+    # v2, test desktop 2026-11-12, gtk_testapp: a GTK4 DropDown is a
+    # non-focusable "combo box" around a focusable toggle button
+    # (reader.py walks only what lies outside it: its popup list).
+    "combo box",
 ))
 
 
@@ -127,4 +131,4 @@ def is_menu_item_candidate(role_name, states, alive):
         return False
     if role_name not in MENU_ITEM_ROLES:
         return False
-    return _is_enabled(states)
+    return is_enabled(states)

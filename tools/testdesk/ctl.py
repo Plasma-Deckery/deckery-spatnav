@@ -98,6 +98,19 @@ _WINDOWS_JS = """(function () {
 })()"""
 
 
+def is_viewer(window):
+    """The backend viewer's overlay (tools/v2_viewer.py), by the PID file
+    restart_backend.sh keeps — its resource class python3.14 is also what
+    KWin gives every popup of a GTK app run with python3 (gtk_testapp)."""
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"),
+                        f"deckery-testdesk{os.environ.get('DECKERY_TESTDESK', '')}", "viewer.pid")
+    try:
+        with open(path) as f:
+            return window["pid"] == int(f.read().strip())
+    except (OSError, ValueError):
+        return window["cls"] == "python3.14" and not window["popup"]
+
+
 def _window_js(cls, body):
     return f"""(function () {{
         var s = workspace.stackingOrder;
@@ -361,7 +374,7 @@ def check(verbose=True):
             failures.append(f"target of unknown/minimized window: {e['role']} {e['name']!r}")
             continue
         above = [Rect(*w["frame"]) for w in mapped
-                 if order[w["id"]] > order[own["id"]] and w["cls"] != "python3.14"]
+                 if order[w["id"]] > order[own["id"]] and not is_viewer(w)]
         for part in e["visible"]:
             r = Rect(*part)
             inside = r.intersect(Rect(*own["frame"]))
