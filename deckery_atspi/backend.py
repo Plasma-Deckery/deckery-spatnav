@@ -39,7 +39,7 @@ from .visibility import visible_regions
 # flyout opens (test desktop 2026-11-11), each re-read costing up to 600 ms.
 CONTENT_DEBOUNCE_MS = 150
 CONTENT_MAX_DELAY_MS = 600
-# One follow-up re-read this long after an event-driven one: QML animates
+# One follow-up re-read this long after an event- or poll-driven one: QML animates
 # layout changes without bounds-changed events, so the first re-read can
 # catch the panel mid-animation (pager added → task buttons sliding right,
 # test desktop 2026-11-11) and nothing would ever correct it.
@@ -91,6 +91,7 @@ class Backend:
         self._first_pending_at = 0.0
         self._settle_timer = 0
         self._settle_bus_names = set()
+        self._settle_windows = set()
         self._listener = None
         # KWin windows a frame re-list was already tried for: a window KWin
         # reports for the first time gets one immediate re-list (a new
@@ -110,6 +111,8 @@ class Backend:
     def _poll_active_window(self):
         scene = self.scene
         if scene is None or self._content_timer:
+            if os.environ.get("DECKERY_DEBUG_POLL") and scene is not None:
+                self._log("[poll] skipped: content timer pending")
             return GLib.SOURCE_CONTINUE
         cached = self._raw.get(scene.active_window_id)
         if cached is None:
@@ -119,7 +122,11 @@ class Backend:
         # scroll events at all).
         samples = (self._probes.get(scene.active_window_id, []) +
                    [e for e in cached[2] if not e.inferred])[:ACTIVE_POLL_MAX_ELEMENTS]
-        for sample, r in zip(samples, live_rects(samples)):
+        live = live_rects(samples)
+        if os.environ.get("DECKERY_DEBUG_POLL"):
+            self._log(f"[poll] {scene.active_window_id[:9]} {len(samples)} samples, first "
+                      f"{[(s.rect.y, r.y) for s, r in list(zip(samples, live))[:3]]}")
+        for sample, r in zip(samples, live):
             rect = sample.rect
             if abs(r.x - rect.x) > 0.5 or abs(r.y - rect.y) > 0.5 \
                     or abs(r.w - rect.w) > 0.5 or abs(r.h - rect.h) > 0.5:
@@ -219,8 +226,13 @@ class Backend:
         dirty, self._dirty_bus_names = self._dirty_bus_names, set()
         windows, self._dirty_windows = self._dirty_windows, set()
         self._update(reread_bus_names=dirty, reread_windows=windows)
-        if dirty:
+        if dirty or windows:
+            # Poll-triggered re-reads too: Chromium updates positions first
+            # and SHOWING a moment later when a list scrolls; a fast read in
+            # between keeps scrolled-out rows as targets, and the poll only
+            # compares rects (test desktop 2026-11-12, batched reader).
             self._settle_bus_names |= dirty
+            self._settle_windows |= windows
             if self._settle_timer:
                 GLib.source_remove(self._settle_timer)
             self._settle_timer = GLib.timeout_add(SETTLE_REREAD_MS, self._settle_reread)
@@ -229,9 +241,10 @@ class Backend:
     def _settle_reread(self):
         self._settle_timer = 0
         dirty, self._settle_bus_names = self._settle_bus_names, set()
+        windows, self._settle_windows = self._settle_windows, set()
         # Straight to _update: going through _flush_content would schedule
         # yet another settle pass.
-        self._update(reread_bus_names=dirty)
+        self._update(reread_bus_names=dirty, reread_windows=windows)
         return GLib.SOURCE_REMOVE
 
     def _reread_empty_later(self, window_id):

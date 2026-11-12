@@ -213,6 +213,11 @@ Automatisch gefunden mit `tools/testdesk/` (siehe README dort):
   - Getötete Apps senden kein `window:destroy` → Frame-Liste wird bei
     children-changed der Registry neu geholt (sonst Zuordnung zum toten
     Frame über die gleiche Überschrift).
+- **Chromium mit dem gebündelten Reader:** ~255 Knoten in 150–280 ms statt
+  1–1,5 s. Dadurch neu sichtbar: beim Scrollen einer Liste aktualisiert
+  Chromium erst die Positionen, SHOWING etwas später — ein schnelles Lesen
+  dazwischen behält weggescrollte Zeilen als Ziele, und der Poll vergleicht
+  nur Rechtecke. → Nachlese-Durchgang auch nach poll-ausgelöstem Lesen.
 - Electron: noch keine App installiert, ungetestet.
 - Sichtbare Splitter: ein Fenster, das 3 px unter einem anderen hervorschaut,
   liefert 3 px breite Ziele — korrekt nach Scope, für die Navigation
