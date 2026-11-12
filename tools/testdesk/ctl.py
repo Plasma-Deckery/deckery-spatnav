@@ -293,10 +293,15 @@ def live_rects():
 def stale_targets(items, tolerance=1.0):
     """Published targets whose position disagrees with AT-SPI right now.
     Within one window every target is offset from its live window-relative
-    rect by the same window origin; the majority offset is taken as truth
-    (no Chromium windows here, so no DIP scaling to account for)."""
+    rect by the same window origin; the majority offset is taken as truth.
+    Chromium's web content is in DIP (live rect = output scale x published),
+    so each target may match at scale 1 or at any output's scale — the size
+    tells which."""
     from collections import Counter
     live = live_rects()
+    scales = {1.0} | {s for s in kwin_eval("(function(){var o=[];var s=workspace.screens;"
+                                          "for(var i=0;i<s.length;i++)o.push(s[i].devicePixelRatio);"
+                                          "return o;})()")}
     popup_windows = {w["id"] for w in kwin_eval(_WINDOWS_JS) if w["popup"]}
     by_window = {}
     gone = []
@@ -310,8 +315,11 @@ def stale_targets(items, tolerance=1.0):
         r = live[e["id"]]
         if r is None:
             continue
-        delta = (round(e["rect"][0] - r[0]), round(e["rect"][1] - r[1]))
-        size_ok = abs(e["rect"][2] - r[2]) <= tolerance and abs(e["rect"][3] - r[3]) <= tolerance
+        scale = next((s for s in sorted(scales) if abs(e["rect"][2] - r[2] / s) <= tolerance
+                      and abs(e["rect"][3] - r[3] / s) <= tolerance), None)
+        size_ok = scale is not None
+        scale = scale or 1.0
+        delta = (round(e["rect"][0] - r[0] / scale), round(e["rect"][1] - r[1] / scale))
         by_window.setdefault(e["window"], []).append((e, delta, size_ok))
     stale = list(gone)
     for entries in by_window.values():

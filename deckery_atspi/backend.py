@@ -44,6 +44,13 @@ CONTENT_MAX_DELAY_MS = 600
 # catch the panel mid-animation (pager added → task buttons sliding right,
 # test desktop 2026-11-11) and nothing would ever correct it.
 SETTLE_REREAD_MS = 700
+# Source of children-changed on the desktop root when apps come and go.
+REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
+# A frame without children when read. Chromium builds its tree only after
+# a11y gets switched on, a moment after the window appears, and sends no
+# event when done (test desktop 2026-11-12: 1 node at window:create, 255 a
+# second later). Re-read with these delays until something is there.
+EMPTY_FRAME_REREAD_MS = (300, 600, 1200, 2400, 4800)
 ACTIVE_POLL_MS = 300
 # Upper bound on live calls per poll (asked all at once: ~0.1 ms each,
 # one at a time it was ~0.5 ms each).
@@ -73,6 +80,7 @@ class Backend:
         self.elements = []
         # window_id → (frame_id, (width, height), [RawElement])
         self._raw = {}
+        self._probes = {}  # window_id -> ReadStats.probes of its last read
         self._dirty_bus_names = set()
         self._dirty_windows = set()
         # Open popups (context menus, submenus) by element id: Qt doesn't
@@ -89,6 +97,7 @@ class Backend:
         # flyout/popup's frame is usually there already), after that only
         # the rate-limited retry.
         self._relisted_for = set()
+        self._empty_rereads = {}  # window_id -> re-reads of an empty frame so far
 
     # ---- inputs ----
 
@@ -105,10 +114,15 @@ class Backend:
         cached = self._raw.get(scene.active_window_id)
         if cached is None:
             return GLib.SOURCE_CONTINUE
-        sample = [e for e in cached[2] if not e.inferred][:ACTIVE_POLL_MAX_ELEMENTS]
-        for element, r in zip(sample, live_rects(sample)):
-            if abs(r.x - element.rect.x) > 0.5 or abs(r.y - element.rect.y) > 0.5 \
-                    or abs(r.w - element.rect.w) > 0.5 or abs(r.h - element.rect.h) > 0.5:
+        # Scroll probes first: a page scrolled past all its targets moves
+        # none of the cached ones (test desktop 2026-11-12, Chromium sends no
+        # scroll events at all).
+        samples = (self._probes.get(scene.active_window_id, []) +
+                   [e for e in cached[2] if not e.inferred])[:ACTIVE_POLL_MAX_ELEMENTS]
+        for sample, r in zip(samples, live_rects(samples)):
+            rect = sample.rect
+            if abs(r.x - rect.x) > 0.5 or abs(r.y - rect.y) > 0.5 \
+                    or abs(r.w - rect.w) > 0.5 or abs(r.h - rect.h) > 0.5:
                 self._dirty_windows.add(scene.active_window_id)
                 self._schedule_update()
                 break
@@ -126,6 +140,11 @@ class Backend:
             return
         if event.type.startswith("window:"):
             self.frames = None  # re-list on next update
+        elif bus_name == REGISTRY_BUS_NAME and event.type.startswith("object:children-changed"):
+            # An application (un)registered. A killed app never sends
+            # window:destroy, and its stale frame would still be matched by
+            # caption (test desktop 2026-11-12: restarted Chromium).
+            self.frames = None
         elif event.type == "object:state-changed:showing" and self._track_popup(event):
             pass
         elif event.type.startswith("object:property-change:accessible-name"):
@@ -215,6 +234,18 @@ class Backend:
         self._update(reread_bus_names=dirty)
         return GLib.SOURCE_REMOVE
 
+    def _reread_empty_later(self, window_id):
+        tries = self._empty_rereads.get(window_id, 0)
+        if tries >= len(EMPTY_FRAME_REREAD_MS):
+            return
+        self._empty_rereads[window_id] = tries + 1
+
+        def reread():
+            self._dirty_windows.add(window_id)
+            self._schedule_update()
+            return GLib.SOURCE_REMOVE
+        GLib.timeout_add(EMPTY_FRAME_REREAD_MS[tries], reread)
+
     # ---- core ----
 
     def _relist_frames(self):
@@ -263,8 +294,25 @@ class Backend:
                 if "popupWindow" in window.flags and (cached is None or cached[0] != frame.id):
                     self._log(f"[popup] kwin {window.frame} ← {frame.role} {frame.name!r} "
                               f"{frame.width}x{frame.height} ({match.rule})")
+                if reason == "poll/size":
+                    # Not triggered by an event, so libatspi's cached
+                    # children/states of this window may be outdated: it
+                    # only updates them from events, and Chromium sends
+                    # none for a tree it builds or a page it scrolls (test
+                    # desktop 2026-11-12: a frame cached as childless stayed
+                    # so while a fresh process saw 255 nodes).
+                    # (The batched reader doesn't use libatspi's cache, but
+                    # frame_info and DECKERY_READER=sync do.)
+                    frame.accessible.clear_cache()
                 raw, stats = read_window(frame.accessible, frame.toolkit)
                 self._raw[window_id] = (frame.id, size, raw)
+                self._probes[window_id] = stats.probes
+                if stats.nodes <= 1:
+                    self._log(f"[empty] {window.resource_class} ← {frame.id} {frame.role} {frame.name!r} "
+                              f"{frame.width}x{frame.height} ({match.rule})")
+                    self._reread_empty_later(window_id)
+                else:
+                    self._empty_rereads.pop(window_id, None)
                 reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms{stats.note}({reason})")
             elif cached[1] != size:
                 self._dirty_windows.add(window_id)
@@ -275,6 +323,8 @@ class Backend:
         for window_id in list(self._raw):
             if window_id not in by_id:
                 del self._raw[window_id]
+                self._probes.pop(window_id, None)
+                self._empty_rereads.pop(window_id, None)
 
         self.elements = elements
         if reads:

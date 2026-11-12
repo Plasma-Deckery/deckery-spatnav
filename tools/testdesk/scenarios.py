@@ -194,6 +194,58 @@ def eis(*args):
                    check=True, stdout=subprocess.DEVNULL, timeout=30)
 
 
+def scenario_chromium():
+    """Chromium Flatpak with a throwaway profile (tools/testdesk/chromium.sh,
+    page.html). Its own UI (tab strip, toolbar) reports logical pixels, the
+    page DIP; the tab is a target, a closed <select> one target, the page
+    itself none next to its controls. Chromium sends no AT-SPI event when
+    the page or a list in it scrolls (test desktop 2026-11-12): only the
+    active-window poll can notice, so targets must follow within seconds."""
+    if not has_window("org.chromium.Chromium"):
+        return "skipped (not running: tools/testdesk/chromium.sh)"
+    ctl.kwin_raise("org.chromium.Chromium")
+    ctl.kwin_move("org.chromium.Chromium", 60, 30, 1000, 660)
+    eis("scroll", 900, 500, -30)  # page to the top
+    settle(timeout_s=8)
+    eis("scroll", 200, 330, -10)  # list to the top
+    _, items = settle(timeout_s=8)
+    screenshot("chromium-top")
+    for name in ("Reload", "Address and search bar", "Erster Knopf", "Listeneintrag 1"):
+        expect(by_name(items, name), f"{name!r} not a target")
+    expect(any(e["role"] == "page tab" for e in items), "the browser tab is not a target")
+    expect(not [e for e in items if e["role"] == "menu item"], "option inside the closed <select> is a target")
+    expect(not [e for e in items if e["role"] == "document web"], "the page itself is a target")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"{len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+
+    x, y = by_name(items, "Erster Knopf")[0]["target"]
+    t0 = time.monotonic()
+    eis("scroll", x + 400, y, 30)  # beside the list: scrolls the page to the bottom
+    scrolled = lambda it: by_name(it, "Knopf ganz unten") and not by_name(it, "Erster Knopf")
+    items = wait_for(scrolled, 8)
+    page_s = time.monotonic() - t0
+    screenshot("chromium-page-scrolled")
+    expect(scrolled(items), "page scroll not picked up within 8 s")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"after page scroll, {len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+    eis("scroll", x + 400, y, -30)
+    items = wait_for(lambda it: by_name(it, "Erster Knopf"), 8)
+    expect(by_name(items, "Erster Knopf"), "scrolling back not picked up within 8 s")
+
+    x, y = by_name(items, "Listeneintrag 1")[0]["target"]
+    t0 = time.monotonic()
+    eis("scroll", x, y, 3)
+    scrolled = lambda it: by_name(it, "Listeneintrag 8") and not by_name(it, "Listeneintrag 1")
+    items = wait_for(scrolled, 8)
+    list_s = time.monotonic() - t0
+    screenshot("chromium-list-scrolled")
+    expect(scrolled(items), "list scroll inside the page not picked up within 8 s")
+    stale = ctl.stale_targets(items)
+    expect(not stale, f"after list scroll, {len(stale)} stale: {[e['name'] for e in stale[:5]]}")
+    eis("scroll", x, y, -3)
+    return f"ok, page scroll picked up after {page_s:.1f}s, list scroll after {list_s:.1f}s"
+
+
 def scenario_menu():
     """Right-click a file in Dolphin: the context menu (an xdg_popup, its
     own KWin window above everything) must become targets, and nothing
@@ -460,6 +512,7 @@ SCENARIOS = {
     "menu": scenario_menu,
     "submenu": scenario_submenu,
     "flyout": scenario_flyout,
+    "chromium": scenario_chromium,
     "desktop_icons": scenario_desktop_icons,
     "desktops": scenario_desktops,
     "multimonitor": scenario_multimonitor,

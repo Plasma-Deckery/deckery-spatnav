@@ -41,8 +41,8 @@ def ids(elements):
     return [e.id.rsplit("/", 1)[1] for e in elements]
 
 
-def walk(root, prune_hidden=False):
-    return select_targets(root, prune_hidden, ReadStats())
+def walk(root, prune_hidden=False, stats=None):
+    return select_targets(root, prune_hidden, stats if stats is not None else ReadStats())
 
 
 class EligibilityTest(unittest.TestCase):
@@ -91,10 +91,12 @@ class WalkTest(unittest.TestCase):
             Node("/1", Atspi.Role.SCROLL_PANE, SHOWN, (0, 0, 100, 100), children=[
                 Node("/2", Atspi.Role.LIST_ITEM, SHOWN, (0, 0, 100, 20), "near"), far])])
         stats = ReadStats()
-        out = select_targets(root, False, stats)
+        out = walk(root, False, stats)
         self.assertEqual(ids(out), ["2"])
         self.assertEqual(out[0].clips, (Rect(0, 0, 100, 100),))
         self.assertEqual(stats.pruned, 1)
+        # scroll probe: first child of the clipping container
+        self.assertEqual([(p.id[-2:], p.rect) for p in stats.probes], [("/2", Rect(0, 0, 100, 20))])
 
     def test_qt_hidden_subtree_pruned(self):
         root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
@@ -117,6 +119,50 @@ class WalkTest(unittest.TestCase):
         self.assertEqual([e.inferred for e in out], [False, True, False])
         self.assertEqual(out[1].rect, Rect(4, 34, 192, 30))
         self.assertEqual(out[0].rect, Rect(4, 4, 192, 30))
+
+    def test_web_space_and_clips(self):
+        # Chromium: the browser UI is not web space; "document web" and
+        # everything in it is, and so are the clips from it inwards.
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.SCROLL_PANE, SHOWN, (0, 0, 500, 500), children=[
+                Node("/2", Atspi.Role.PUSH_BUTTON, TARGET, (0, 0, 20, 20), "Back"),
+                Node("/3", Atspi.Role.DOCUMENT_WEB, TARGET, (0, 50, 400, 400), "Page", children=[
+                    Node("/4", Atspi.Role.LIST, SHOWN, (0, 50, 300, 300), children=[
+                        Node("/5", Atspi.Role.LINK, TARGET, (5, 60, 50, 10), "Link")])])])])
+        out = walk(root)
+        self.assertEqual(ids(out), ["2", "5"])
+        # clips of the link: scroll pane | document, list (the document
+        # clips too, and is web space itself)
+        self.assertEqual([(e.web, e.web_clips) for e in out], [(False, 0), (True, 2)])
+        self.assertEqual(len(out[1].clips), 3)
+
+    def test_document_alone_is_a_target(self):
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.DOCUMENT_WEB, TARGET, (0, 0, 400, 400), "Empty page")])
+        out = walk(root)
+        self.assertEqual(ids(out), ["1"])
+        self.assertEqual((out[0].web, out[0].web_clips), (True, 0))
+
+    def test_closed_combo_box_options_skipped(self):
+        def combo(path, states):
+            return Node(path, Atspi.Role.COMBO_BOX, states, (0, 0, 100, 20), "Pick", children=[
+                Node(path + "1", Atspi.Role.MENU, (S.ENABLED,), (0, 20, 100, 60), children=[
+                    Node(path + "2", Atspi.Role.MENU_ITEM, TARGET, (0, 20, 100, 20), "b")])])
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            combo("/1", TARGET), combo("/5", TARGET + (S.EXPANDED,))])
+        # expanded: the option is a target and suppresses nothing (combo
+        # box isn't a container role); closed: only the combo box itself
+        self.assertEqual(ids(walk(root)), ["1", "52", "5"])
+
+    def test_tab_in_tab_list_stays_target(self):
+        root = Node("/0", Atspi.Role.FRAME, SHOWN, children=[
+            Node("/1", Atspi.Role.PAGE_TAB_LIST, SHOWN, (0, 0, 400, 30), children=[
+                Node("/2", Atspi.Role.PAGE_TAB, TARGET, (0, 0, 100, 30), "Tab", children=[
+                    Node("/3", Atspi.Role.PUSH_BUTTON, TARGET, (80, 5, 15, 15), "Close")])]),
+            Node("/4", Atspi.Role.FILLER, SHOWN, (0, 30, 400, 300), children=[
+                Node("/5", Atspi.Role.PAGE_TAB, TARGET, (0, 30, 400, 300), "Page", children=[
+                    Node("/6", Atspi.Role.PUSH_BUTTON, TARGET, (10, 40, 20, 20), "OK")])])])
+        self.assertEqual(ids(walk(root)), ["3", "2", "6"])
 
 
 # ---- fetch_tree against a fake bus ----
@@ -198,6 +244,10 @@ class FetchTest(unittest.TestCase):
         WalkTest.test_clipped_away_subtree_not_walked,
         WalkTest.test_qt_hidden_subtree_pruned,
         WalkTest.test_popup_menu_repair_and_rebase,
+        WalkTest.test_web_space_and_clips,
+        WalkTest.test_document_alone_is_a_target,
+        WalkTest.test_closed_combo_box_options_skipped,
+        WalkTest.test_tab_in_tab_list_stays_target,
     ]
 
     def test_same_as_full_read(self):
@@ -205,10 +255,16 @@ class FetchTest(unittest.TestCase):
         import tests.test_reader as module
         original = module.walk
         try:
-            def via_fetch(root, prune_hidden=False):
-                out, stats, _ = fetched_walk(root, prune_hidden)
-                self.assertEqual(stats.fallbacks, 0)
-                self.assertEqual(out, original(root, prune_hidden))
+            def via_fetch(root, prune_hidden=False, stats=None):
+                out, fetched_stats, _ = fetched_walk(root, prune_hidden)
+                self.assertEqual(fetched_stats.fallbacks, 0)
+                full_stats = ReadStats()
+                self.assertEqual(out, original(root, prune_hidden, full_stats))
+                self.assertEqual(fetched_stats.probes, full_stats.probes)
+                self.assertEqual((fetched_stats.nodes, fetched_stats.pruned),
+                                 (full_stats.nodes, full_stats.pruned))
+                if stats is not None:
+                    stats.__dict__.update(fetched_stats.__dict__)
                 return out
             module.walk = via_fetch
             for test in self.TREES:

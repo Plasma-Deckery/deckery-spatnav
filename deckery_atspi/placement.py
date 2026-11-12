@@ -12,16 +12,17 @@ One resolver with named rules instead of the old fallback cascade
   measured on the test desktop 2026-11-11 with Flatseal: buffer origin put
   every box exactly the 25.45 px shadow margin up-left. GTK3/Gecko keep
   the buffer origin (Firefox measurement above).
-- rule "chromium-dip": Chromium's web contents report CSS/DIP pixels, i.e.
-  output scale too large; its own titlebar buttons do not (deckery#28).
-  Applied with the window's own output scale, no longer hardcoded 1.1."""
+- rule "chromium-dip": Chromium's web contents (everything inside a
+  "document web", reader.py marks it) report CSS/DIP pixels, i.e. output
+  scale too large. Chromium's own UI around it does not: deckery#28 found
+  that for the titlebar buttons; on the test desktop 2026-11-12 (Chromium
+  Flatpak, Wayland, scale 1.1) the tab strip, toolbar and address bar
+  behaved the same, each landing exactly when not divided. Applied with
+  the window's own output scale, no longer hardcoded 1.1."""
 
 from dataclasses import dataclass
 
 from .geometry import Rect, region_intersect
-
-CHROMIUM_TITLEBAR_BUTTONS = frozenset(("Minimize", "Maximize", "Restore", "Close"))
-
 
 @dataclass(frozen=True)
 class Placement:
@@ -29,8 +30,8 @@ class Placement:
     origin_y: float
     dip_scale: float  # 1.0 unless rule chromium-dip applies
 
-    def to_screen(self, rect, name=""):
-        scale = 1.0 if name in CHROMIUM_TITLEBAR_BUTTONS else self.dip_scale
+    def to_screen(self, rect, web=False):
+        scale = self.dip_scale if web else 1.0
         return Rect(rect.x / scale + self.origin_x, rect.y / scale + self.origin_y,
                     rect.w / scale, rect.h / scale)
 

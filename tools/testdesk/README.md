@@ -35,4 +35,12 @@ gets the same suffix: `DECKERY_TESTDESK=2 tools/testdesk/restart_all.sh …`,
   virtual desktops, invariants.
 
 Flatpak apps use the real `~/.var/app` profile even here — don't run
-Firefox/Chromium Flatpaks in tests.
+Firefox/Chromium Flatpaks in tests directly. `chromium.sh` (host) starts the
+Chromium Flatpak with a throwaway profile under
+`~/.var/app/org.chromium.Chromium/deckery-testdesk/` and `page.html`, with the
+flags it needs to expose anything to AT-SPI (see the script).
+`restart_backend.sh` restarts only backend + viewer (by PID file, never
+pkill — the containers share the host's PID namespace). With
+`DECKERY_READER=compare` (also for `restart_all.sh`) the backend reads every
+window with both the batched and the libatspi reader and logs `[compare]`
+differences and `/sync=…ms` timings; `=sync` runs the old reader alone.

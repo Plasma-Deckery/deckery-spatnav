@@ -15,8 +15,6 @@ for app in "$@"; do
     $H sh -c "$REPO/tools/testdesk/run.sh setsid $app > $STATE/app-$(basename "${app%% *}").log 2>&1 &"
 done
 sleep 4
-setsid env DECKERY_TESTDESK="$INSTANCE" "$REPO/tools/testdesk/run_box.sh" env DECKERY_READER="${DECKERY_READER:-async}" DECKERY_DEBUG_MENUS=1 DECKERY_DEBUG_EVENTS=1 python3 -u -W ignore -m deckery_atspi > $STATE/backend.log 2>&1 &
-sleep 4
-setsid env DECKERY_TESTDESK="$INSTANCE" "$REPO/tools/testdesk/run_box.sh" python3 -u -W ignore tools/v2_viewer.py > $STATE/viewer.log 2>&1 &
-sleep 5
+"$REPO/tools/testdesk/restart_backend.sh"
+sleep 1
 echo "up"
