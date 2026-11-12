@@ -3,7 +3,7 @@
 # virtual framebuffer with its own session D-Bus (→ own AT-SPI bus, own KWin
 # scripting). Nothing here touches the real desktop. Run on the HOST.
 #
-#   tools/testdesk/start.sh [OUTPUTS] [WIDTH] [HEIGHT] [SCALE]
+#   [DECKERY_TESTDESK=2] tools/testdesk/start.sh [OUTPUTS] [WIDTH] [HEIGHT] [SCALE]
 #
 # WIDTH/HEIGHT are logical. Defaults mimic the Steam Deck panel: 1164x727
 # logical = 1280x800 physical at scale 1.1. kwin --virtual uses
@@ -11,7 +11,10 @@
 # 1, so session.sh sets the output scale with kscreen-doctor.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
-STATE="${XDG_RUNTIME_DIR}/deckery-testdesk"
+# DECKERY_TESTDESK=<suffix> runs a second, independent instance (own
+# socket, state dir, session bus) next to the default one.
+INSTANCE="${DECKERY_TESTDESK:-}"
+STATE="${XDG_RUNTIME_DIR}/deckery-testdesk${INSTANCE}"
 mkdir -p "$STATE"
 if [ -f "$STATE/pid" ] && kill -0 "$(cat "$STATE/pid")" 2>/dev/null; then
     echo "test desktop already running (pid $(cat "$STATE/pid"))"; exit 0
@@ -29,7 +32,7 @@ export DECKERY_TESTDESK_OUTPUTS="$OUTPUTS" DECKERY_TESTDESK_SCALE="$SCALE"
 # Strip everything that would point apps at the REAL session.
 env -u AT_SPI_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY -u SESSION_MANAGER \
     -u DBUS_SESSION_BUS_ADDRESS -u XAUTHORITY -u XDG_SESSION_ID \
-    setsid dbus-run-session -- kwin_wayland --virtual --xwayland --socket wayland-deckery-test \
+    setsid dbus-run-session -- kwin_wayland --virtual --xwayland --socket "wayland-deckery-test${INSTANCE}" \
         --no-lockscreen --no-global-shortcuts --no-kactivities \
         --output-count "$OUTPUTS" --width "$WIDTH" --height "$HEIGHT" --scale "$SCALE" \
         --exit-with-session "$HERE/session.sh" \

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs inside the nested session: publish its environment, then idle until
 # stop.sh kills the session.
-STATE="${XDG_RUNTIME_DIR}/deckery-testdesk"
+STATE="${XDG_RUNTIME_DIR}/deckery-testdesk${DECKERY_TESTDESK:-}"
 # D-Bus activation of org.a11y.Bus fails here ("Permission denied"): the
 # real session starts it via systemd, which dbus-run-session doesn't have.
 /usr/libexec/at-spi-bus-launcher --launch-immediately > "$STATE/atspi.log" 2>&1 &
@@ -29,6 +29,7 @@ done
     echo "export WAYLAND_DISPLAY='$WAYLAND_DISPLAY'"
     echo "export DISPLAY='${DISPLAY:-}'"
     echo "export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR'"
+    echo "export DECKERY_TESTDESK='${DECKERY_TESTDESK:-}'"
     echo "export XDG_CONFIG_HOME='$XDG_CONFIG_HOME'"
     echo "export XDG_DATA_HOME='$XDG_DATA_HOME'"
     echo "export XDG_CACHE_HOME='$XDG_CACHE_HOME'"

@@ -13,6 +13,12 @@ nothing touches the real desktop or its settings. Deck-like by default:
 
 Screenshots: `$XDG_RUNTIME_DIR/deckery-testdesk/shots/`, logs next to it.
 
+A second, independent instance (own socket `wayland-deckery-test2`, state dir
+`deckery-testdesk2`, session bus) runs next to the first when every command
+gets the same suffix: `DECKERY_TESTDESK=2 tools/testdesk/restart_all.sh …`,
+`DECKERY_TESTDESK=2 tools/testdesk/run_box.sh …`, and on the host
+`env DECKERY_TESTDESK=2 tools/testdesk/stop.sh`.
+
 - `start.sh` / `session.sh` / `stop.sh` — lifecycle (host). The session starts
   `at-spi-bus-launcher` and `at-spi2-registryd` itself (their D-Bus/systemd
   activation belongs to the real session) and sets the output scale with

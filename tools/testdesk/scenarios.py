@@ -21,7 +21,11 @@ import ctl
 from deckery_atspi.geometry import Rect, region_area
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SHOTS = os.path.join(os.environ["XDG_RUNTIME_DIR"], "deckery-testdesk", "shots")
+INSTANCE = os.environ.get("DECKERY_TESTDESK", "")
+SHOTS = os.path.join(os.environ["XDG_RUNTIME_DIR"], f"deckery-testdesk{INSTANCE}", "shots")
+# distrobox-host-exec does not forward the environment.
+HOST_RUN = ["distrobox-host-exec", "env", f"DECKERY_TESTDESK={INSTANCE}",
+            os.path.join(REPO, "tools/testdesk/run.sh")]
 
 
 class ScenarioFailed(AssertionError):
@@ -36,7 +40,7 @@ def expect(condition, message):
 def screenshot(name):
     os.makedirs(SHOTS, exist_ok=True)
     path = os.path.join(SHOTS, f"{name}.png")
-    subprocess.run(["distrobox-host-exec", os.path.join(REPO, "tools/testdesk/run.sh"),
+    subprocess.run([*HOST_RUN,
                     "spectacle", "-b", "-n", "-f", "-o", path],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     return path
@@ -185,7 +189,7 @@ def scenario_scroll():
 
 def eis(*args):
     """Real input into the test desktop (tools/testdesk/eis_input.py, host)."""
-    subprocess.run(["distrobox-host-exec", os.path.join(REPO, "tools/testdesk/run.sh"), "python3",
+    subprocess.run([*HOST_RUN, "python3",
                     os.path.join(REPO, "tools/testdesk/eis_input.py"), *map(str, args)],
                    check=True, stdout=subprocess.DEVNULL, timeout=30)
 
@@ -366,7 +370,7 @@ def outputs():
 
 
 def set_scale(output, scale):
-    subprocess.run(["distrobox-host-exec", os.path.join(REPO, "tools/testdesk/run.sh"),
+    subprocess.run([*HOST_RUN,
                     "kscreen-doctor", f"output.{output}.scale.{scale}"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     time.sleep(1.0)

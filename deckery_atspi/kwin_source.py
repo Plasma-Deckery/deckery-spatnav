@@ -77,7 +77,7 @@ class KWinSceneSource:
     def _render_script(self):
         with open(_SCRIPT_TEMPLATE) as f:
             source = f.read().replace("__BUS_NAME__", self.bus_name)
-        path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"{self.bus_name}.kwin_scene.js")
+        path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"{self.bus_name}.{os.getpid()}.kwin_scene.js")
         with open(path, "w") as f:
             f.write(source)
         return path
