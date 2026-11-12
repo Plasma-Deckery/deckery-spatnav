@@ -2,14 +2,15 @@
 
 Started as a copy of prototype_atspi_scan.is_relevant_element and its
 container-suppression set (the old pipeline keeps using those unchanged);
-v2-only changes are marked with the finding that motivated them."""
+v2-only changes are marked with the finding that motivated them.
+
+Pure: works on already-fetched data (role name, the set of
+Atspi.StateType values as ints), so the reader can feed it from libatspi
+or from batched D-Bus replies alike."""
 
 import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
-
-from vendor.orca_ax.ax_object import AXObject
-from vendor.orca_ax.ax_utilities_state import AXUtilitiesState
 
 NEVER_RELEVANT_ROLES = frozenset(("label",))
 
@@ -30,39 +31,51 @@ SUPPRESS_CONTAINER_IF_HAS_ELIGIBLE_CHILD_ROLES = frozenset((
     "page tab",
 ))
 
+SHOWING = int(Atspi.StateType.SHOWING)
+ENABLED = int(Atspi.StateType.ENABLED)
+SENSITIVE = int(Atspi.StateType.SENSITIVE)
+FOCUSABLE = int(Atspi.StateType.FOCUSABLE)
+FOCUSED = int(Atspi.StateType.FOCUSED)
 
-def _is_enabled(node, state_set):
+
+def states_from_bits(low, high):
+    """GetState's two uint32 words → set of Atspi.StateType ints (bit n
+    set = state n, as libatspi decodes it)."""
+    bits = low | (high << 32)
+    return frozenset(n for n in range(64) if bits >> n & 1)
+
+
+def states_from_state_set(state_set):
+    return frozenset(int(s) for s in state_set.get_states())
+
+
+def _is_enabled(states):
     # Test desktop 2026-11-11, Flatseal (GTK4/libadwaita): GTK4 never sets
     # ENABLED, only SENSITIVE — every GTK4 widget looked disabled.
-    return (AXUtilitiesState.is_enabled(node, state_set)
-            or state_set.contains(Atspi.StateType.SENSITIVE))
+    return ENABLED in states or SENSITIVE in states
 
 
-def is_relevant_element(node, role_name=None, state_set=None):
+def is_relevant(role_name, states, get_name):
     """FOCUSABLE+SHOWING+ENABLED, with a role-based fallback for QML/
     Kirigami list rows (not focusable there) and Firefox's named menu-bar
-    menus (not SHOWING while closed). role_name/state_set can be passed in
-    when the caller already has them: every AT-SPI call is a ~0.4 ms D-Bus
-    round trip (profiled on the test desktop, Dolphin: the role was fetched
-    twice per node and AXObject.is_dead() pinged every node)."""
-    if role_name is None:
-        role_name = AXObject.get_role_name(node) or ""
+    menus (not SHOWING while closed). get_name() is only called for the
+    roles that need it (menu, canvas): every AT-SPI call is a round trip
+    (~0.4 ms when made one at a time, profiled on the test desktop)."""
     if role_name in NEVER_RELEVANT_ROLES:
         return False
-    if state_set is None:
-        state_set = AXObject.get_state_set(node)
-    is_showing = AXUtilitiesState.is_showing(node, state_set)
-    is_enabled = _is_enabled(node, state_set)
-    if role_name == "menu" and (AXObject.get_name(node) or ""):
+    is_showing = SHOWING in states
+    is_enabled = _is_enabled(states)
+    if role_name == "menu" and get_name():
         return is_enabled
     if not (is_showing and is_enabled):
         return False
-    if AXUtilitiesState.is_focusable(node, state_set):
+    # Orca's AXUtilitiesState.is_focusable also counts FOCUSED.
+    if FOCUSABLE in states or FOCUSED in states:
         return True
     # Test desktop 2026-11-11, Plasma desktop (FolderView): each desktop
     # icon is a named, non-focusable "canvas" whose only focusable child is
     # a label (and labels are never targets).
-    if role_name == "canvas" and AXObject.get_name(node):
+    if role_name == "canvas" and get_name():
         return True
     # v2, test desktop 2026-11-11: Qt menu items are SHOWING but never
     # FOCUSABLE (Dolphin context menu, menu bar submenus).
@@ -73,11 +86,11 @@ def is_relevant_element(node, role_name=None, state_set=None):
 MENU_ITEM_ROLES = frozenset(("menu item", "check menu item", "radio menu item"))
 
 
-def is_menu_item_candidate(node):
+def is_menu_item_candidate(role_name, states, alive):
     """Eligible except for SHOWING — for menu_repair: Qt reports shared
     actions in an open menu as not showing."""
-    if AXObject.is_dead(node):
+    if not alive:
         return False
-    if (AXObject.get_role_name(node) or "") not in MENU_ITEM_ROLES:
+    if role_name not in MENU_ITEM_ROLES:
         return False
-    return _is_enabled(node, AXObject.get_state_set(node))
+    return _is_enabled(states)

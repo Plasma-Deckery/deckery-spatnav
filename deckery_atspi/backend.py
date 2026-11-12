@@ -29,7 +29,7 @@ from .atspi_frames import POPUP_ROLES, element_id, frame_info, list_frames
 from .compose import compose_window
 from .matching import match_windows
 from .placement import placement_for
-from .reader import live_rect, read_window
+from .reader import live_rects, read_window
 from .scene import LAYER_OVERLAY
 from .visibility import visible_regions
 
@@ -45,7 +45,8 @@ CONTENT_MAX_DELAY_MS = 600
 # test desktop 2026-11-11) and nothing would ever correct it.
 SETTLE_REREAD_MS = 700
 ACTIVE_POLL_MS = 300
-# Upper bound on live calls per poll (~0.5 ms each).
+# Upper bound on live calls per poll (asked all at once: ~0.1 ms each,
+# one at a time it was ~0.5 ms each).
 ACTIVE_POLL_MAX_ELEMENTS = 60
 # Frames are re-listed on window:create/destroy; this bounds how often an
 # unmatched visible window can trigger an extra re-list.
@@ -104,8 +105,8 @@ class Backend:
         cached = self._raw.get(scene.active_window_id)
         if cached is None:
             return GLib.SOURCE_CONTINUE
-        for element in [e for e in cached[2] if not e.inferred][:ACTIVE_POLL_MAX_ELEMENTS]:
-            r = live_rect(element.accessible)
+        sample = [e for e in cached[2] if not e.inferred][:ACTIVE_POLL_MAX_ELEMENTS]
+        for element, r in zip(sample, live_rects(sample)):
             if abs(r.x - element.rect.x) > 0.5 or abs(r.y - element.rect.y) > 0.5 \
                     or abs(r.w - element.rect.w) > 0.5 or abs(r.h - element.rect.h) > 0.5:
                 self._dirty_windows.add(scene.active_window_id)
@@ -264,7 +265,7 @@ class Backend:
                               f"{frame.width}x{frame.height} ({match.rule})")
                 raw, stats = read_window(frame.accessible, frame.toolkit)
                 self._raw[window_id] = (frame.id, size, raw)
-                reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms({reason})")
+                reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms{stats.note}({reason})")
             elif cached[1] != size:
                 self._dirty_windows.add(window_id)
                 self._schedule_update()
