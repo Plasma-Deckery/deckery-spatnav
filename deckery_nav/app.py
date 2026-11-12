@@ -123,7 +123,11 @@ class NavApp(Gtk.Application):
                            self._on_backend_up, self._on_backend_down)
         node = Gio.DBusNodeInfo.new_for_xml(NAV_XML)
         bus.register_object(NAV_PATH, node.interfaces[0], self._on_call, None, None)
-        Gio.bus_own_name_on_connection(bus, NAV_NAME, Gio.BusNameOwnerFlags.REPLACE, None, None)
+        # Single instance, newest wins: two prototypes would both move the
+        # pointer, and closing a terminal tab does not stop the one in the box.
+        Gio.bus_own_name_on_connection(
+            bus, NAV_NAME, Gio.BusNameOwnerFlags.REPLACE | Gio.BusNameOwnerFlags.ALLOW_REPLACEMENT,
+            None, self._on_name_lost)
         GLib.timeout_add(1000 // INPUT_HZ, self._on_tick)
         GLib.timeout_add(500, self._check_presets_file)
         GLib.timeout_add(250, self._service_pointer)
@@ -131,6 +135,11 @@ class NavApp(Gtk.Application):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, self._quit)
         self.hold()
         print(f"deckery-nav: up — stick: {self.nav.relative.name}, pad: {self.nav.absolute.name}", flush=True)
+
+    def _on_name_lost(self, connection, name):
+        # Also called once at startup if the name could not be taken at all.
+        print("deckery-nav: another instance took over, exiting", flush=True)
+        self._quit()
 
     def _quit(self):
         if self.keeper is not None and self.keeper.want_off_at_exit(self.input.snapshot):
