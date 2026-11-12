@@ -9,6 +9,7 @@ on what the backend publishes. Screenshots land in
 $XDG_RUNTIME_DIR/deckery-testdesk/shots/<scenario>-<step>.png for review."""
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ctl
+from gi.repository import GLib
 from deckery_atspi.geometry import Rect, region_area
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -206,6 +208,11 @@ def scenario_chromium():
         return "skipped (not running: tools/testdesk/chromium.sh)"
     ctl.kwin_raise("org.chromium.Chromium")
     ctl.kwin_move("org.chromium.Chromium", 60, 30, 1000, 660)
+    chromium_id = window_id("org.chromium.Chromium")
+
+    def by_name(items, name):
+        # Firefox (scenario_firefox) shows the same page.
+        return [e for e in items if e["name"] == name and e["window"] == chromium_id]
     eis("scroll", 900, 500, -30)  # page to the top
     settle(timeout_s=8)
     eis("scroll", 200, 330, -10)  # list to the top
@@ -416,6 +423,90 @@ def scenario_flyout():
     return f"{len(mine)} flyout targets after {latency:.1f}s"
 
 
+def scenario_launcher():
+    """Needs plasmashell. The Application Launcher (Kickoff, slides in from
+    the panel): its targets come within 1.5 s of the click, and go within
+    1 s of Escape — real desktop 2026-11-12, its outlines lagged behind."""
+    if not has_window_class("plasmashell"):
+        return "skipped (no plasmashell)"
+    _, before = settle()
+    button = next((e for e in before if e["name"] == "Application Launcher"), None)
+    expect(button, "no Application Launcher target in the panel")
+    before_windows = {w["id"] for w in ctl.kwin_eval(ctl._WINDOWS_JS)}
+    t0 = time.monotonic()
+    eis("click", *button["target"])
+    popup = None
+    while popup is None and time.monotonic() - t0 < 3:
+        popup = next((w for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["id"] not in before_windows), None)
+    expect(popup, "no new KWin window after clicking the launcher")
+    items = wait_for(lambda items: any(e["window"] == popup["id"] for e in items), 1.5)
+    opened = time.monotonic() - t0
+    screenshot("launcher-open")
+    mine = [e for e in items if e["window"] == popup["id"]]
+    expect(mine, "launcher has no targets 1.5 s after opening")
+    t1 = time.monotonic()
+    eis("key", "esc")
+    items = wait_for(lambda items: not any(e["window"] == popup["id"] for e in items), 1.0)
+    closed = time.monotonic() - t1
+    expect(not any(e["window"] == popup["id"] for e in items), "launcher targets remain 1 s after Escape")
+    return f"{len(mine)} targets after {opened:.1f} s, gone {closed:.1f} s after Escape"
+
+
+def scenario_hung():
+    """An app that stops answering must not stall the backend (real desktop
+    2026-11-12: a hung plasmashell froze it for 2.5 min, outlines stayed
+    behind). Dolphin, active, is stopped (SIGSTOP by its own PID): its
+    targets stay, another window moved by KWin follows at once, Get
+    answers quickly; after SIGCONT Dolphin is read again."""
+    missing = [c for c in ("org.kde.dolphin", "systemsettings") if not has_window(c)]
+    if missing:
+        return f"skipped (not running: {missing})"
+    ctl.kwin_move("systemsettings", 0, 0, 600, 500)
+    ctl.kwin_move("org.kde.dolphin", 560, 60, 600, 500)
+    ctl.kwin_raise("org.kde.dolphin")
+    _, before = settle()
+    dolphin_id = window_id("org.kde.dolphin")
+    expect(any(e["window"] == dolphin_id for e in before), "no dolphin targets before stopping it")
+    pid = next(w["pid"] for w in ctl.kwin_eval(ctl._WINDOWS_JS) if w["id"] == dolphin_id)
+    os.kill(pid, signal.SIGSTOP)
+    try:
+        # The active-window poll runs into its timeout once (3 s) and marks
+        # Dolphin; from then on nothing may wait for it.
+        time.sleep(4)
+        slowest = 0.0
+        items = before
+        for _ in range(20):
+            t0 = time.monotonic()
+            try:
+                _, items = ctl.elements()
+            except GLib.Error:  # no answer within ctl's 3 s
+                pass
+            slowest = max(slowest, time.monotonic() - t0)
+            time.sleep(0.1)
+        expect(slowest < 1.0, f"backend answered Get only after {slowest:.1f} s with dolphin hung")
+        expect(any(e["window"] == dolphin_id for e in items), "dolphin's targets vanished while it hung")
+        settings_id = window_id("systemsettings")
+        old = {e["id"]: e["rect"] for e in items if e["window"] == settings_id}
+        t0 = time.monotonic()
+        ctl.kwin_move("systemsettings", 40, 0, 600, 500)
+
+        def moved(items):
+            return any(e["id"] in old and abs(e["rect"][0] - old[e["id"]][0] - 40) < 1 for e in items)
+        items = wait_for(moved, 3)
+        latency = time.monotonic() - t0
+        expect(moved(items), "systemsettings targets did not follow its move while dolphin hung")
+        expect(latency < 1.5, f"systemsettings targets followed its move only after {latency:.1f} s")
+    finally:
+        os.kill(pid, signal.SIGCONT)
+    # Answering again: read again (the probe ends the pause at once).
+    time.sleep(3)
+    _, items = settle()
+    expect(any(e["window"] == dolphin_id for e in items), "no dolphin targets after it continued")
+    failures = ctl.check(verbose=False)
+    expect(not failures, f"after dolphin continued: {failures[:3]}")
+    return f"Get ≤ {slowest * 1000:.0f} ms, move followed after {latency:.1f} s"
+
+
 def scenario_desktop_icons():
     """Needs plasmashell. Desktop icons (Plasma FolderView canvases) are
     targets where the desktop is visible."""
@@ -562,6 +653,8 @@ SCENARIOS = {
     "menu": scenario_menu,
     "submenu": scenario_submenu,
     "flyout": scenario_flyout,
+    "launcher": scenario_launcher,
+    "hung": scenario_hung,
     "chromium": scenario_chromium,
     "firefox": scenario_firefox,
     "desktop_icons": scenario_desktop_icons,

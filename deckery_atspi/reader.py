@@ -116,6 +116,9 @@ class ReadStats:
     # Values the walk needed that the fetch had not asked for (each one a
     # blocking call) — should stay 0, else fetch_tree misses a rule.
     fallbacks: int = 0
+    # A call of the fetch timed out: the app is hung, the result is not
+    # its content (atspi_bus.Batch.timed_out).
+    timed_out: bool = False
     note: str = ""      # DECKERY_READER=compare: sync timing / difference
 
 
@@ -593,6 +596,7 @@ def fetch_tree(bus, frame, prune_hidden, stats):
         root = fetch.start()
         batch.run()
     stats.calls = batch.calls
+    stats.timed_out = batch.timed_out
     return root
 
 
@@ -607,7 +611,9 @@ def read_window(frame, toolkit="", mode=None, rebase=False):
     t0 = time.monotonic()
     bus = shared_bus() if mode != "sync" else None
     root = fetch_tree(bus, frame, prune_hidden, stats) if bus else LiveNode(frame)
-    out = select_targets(root, prune_hidden, stats, rebase)
+    # Walking a timed-out fetch would ask for the missing values one by
+    # one, each waiting out another timeout.
+    out = [] if stats.timed_out else select_targets(root, prune_hidden, stats, rebase)
     stats.ms = 1000 * (time.monotonic() - t0)
     return out, stats
 
@@ -652,7 +658,7 @@ def _split_id(eid):
 def live_rects(elements):
     """Current window-relative rects of elements, asked all at once (the
     active-window freshness poll). Rect(0, 0, 0, 0) where the object is
-    gone or has no extents."""
+    gone or has no extents; None if the app timed out (hung)."""
     bus = shared_bus() if READER_MODE != "sync" else None
     if bus is None:
         return [live_rect(e.accessible) for e in elements]
@@ -669,4 +675,4 @@ def live_rects(elements):
                 batch.call(dest, path, COMPONENT, "GetExtents", _WINDOW_COORDS,
                            functools.partial(store, index))
         batch.run()
-    return rects
+    return None if batch.timed_out else rects

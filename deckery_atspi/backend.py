@@ -27,6 +27,7 @@ from gi.repository import Atspi, GLib
 
 from vendor.orca_ax.ax_object import AXObject
 
+from .atspi_bus import shared_bus
 from .atspi_frames import POPUP_ROLES, element_id, frame_info, list_frames
 from .compose import compose_window
 from .geometry import Rect
@@ -68,6 +69,15 @@ EMBEDDED_POPUP_RETRY_S = 0.2
 # fractional scale: 198x243 vs 199.09x245.45 at scale 1.1 (test desktop
 # 2026-11-12). Position and size both have to fit.
 EMBEDDED_POPUP_TOLERANCE = 4.0
+# An app that missed the frame list's ping or timed out while being read
+# is not read again until it answers this ping (sent without blocking,
+# again PROBE_RETRY_MS after each timeout). Real desktop 2026-11-12,
+# heavy load: plasmashell hung for ~2.5 min; its windows were still read
+# on every update, each read waiting for three 3 s timeouts — 45 s per
+# update, the panel outlines stood still meanwhile.
+PROBE_TIMEOUT_MS = 2000
+PROBE_RETRY_MS = 1000
+APP_ROOT_PATH = "/org/a11y/atspi/accessible/root"
 
 _CONTENT_EVENTS = (
     "object:children-changed",
@@ -77,6 +87,10 @@ _CONTENT_EVENTS = (
     "object:property-change:accessible-name",
 )
 _WINDOW_EVENTS = ("window:create", "window:destroy")
+
+
+def _bus_name(eid):
+    return eid.split("/", 1)[0]
 
 
 class Backend:
@@ -109,7 +123,8 @@ class Backend:
         # the rate-limited retry.
         self._relisted_for = set()
         self._empty_rereads = {}  # window_id -> re-reads of an empty frame so far
-        self._unresponsive_apps = {}  # bus name -> since (atspi_frames.list_frames)
+        # bus name -> since; not read until it answers again (_probe_app)
+        self._unresponsive_apps = {}
         self._last_frames = []  # the last list_frames result, kept when self.frames is reset
         self._embedded_popups = {}  # popup window_id -> FrameInfo (embedded)
         self._embedded_tried = {}  # popup window_id -> monotonic time of the last search
@@ -129,7 +144,7 @@ class Backend:
                 self._log("[poll] skipped: content timer pending")
             return GLib.SOURCE_CONTINUE
         cached = self._raw.get(scene.active_window_id)
-        if cached is None:
+        if cached is None or _bus_name(cached[0]) in self._unresponsive_apps:
             return GLib.SOURCE_CONTINUE
         # Scroll probes first: a page scrolled past all its targets moves
         # none of the cached ones (test desktop 2026-11-12, Chromium sends no
@@ -137,6 +152,10 @@ class Backend:
         samples = (self._probes.get(scene.active_window_id, []) +
                    [e for e in cached[2] if not e.inferred])[:ACTIVE_POLL_MAX_ELEMENTS]
         live = live_rects(samples)
+        if live is None:
+            # Every 300 ms another timeout otherwise.
+            self._mark_unresponsive(_bus_name(cached[0]))
+            return GLib.SOURCE_CONTINUE
         if os.environ.get("DECKERY_DEBUG_POLL"):
             self._log(f"[poll] {scene.active_window_id[:9]} {len(samples)} samples, first "
                       f"{[(s.rect.y, r.y) for s, r in list(zip(samples, live))[:3]]}")
@@ -202,6 +221,8 @@ class Backend:
         frames = list(self.frames)
         known = {f.id for f in frames}
         for eid, acc in list(self._popups.items()):
+            if _bus_name(eid) in self._unresponsive_apps:
+                continue  # frame_info would block on it
             # frame_info's libatspi calls can dispatch AT-SPI events, and a
             # showing=False one already pops eid (real desktop 2026-11-12:
             # KeyError here left stale menu outlines behind).
@@ -287,6 +308,38 @@ class Backend:
         newly_silent = set(self._unresponsive_apps) - silent_before
         self._log(f"[frames] {len(self.frames)} AT-SPI frames in {1000 * (self._frames_listed_at - t0):.0f} ms"
                   + (f", not answering: {' '.join(sorted(newly_silent))}" if newly_silent else ""))
+        for bus_name in newly_silent:
+            self._probe_app(bus_name)
+
+    def _mark_unresponsive(self, bus_name):
+        if bus_name in self._unresponsive_apps:
+            return
+        self._unresponsive_apps[bus_name] = time.monotonic()
+        self._log(f"[frames] {bus_name} not answering, not read until it does")
+        self._probe_app(bus_name)
+
+    def _probe_app(self, bus_name):
+        bus = shared_bus()
+        if bus is not None:
+            bus.ping(bus_name, APP_ROOT_PATH, PROBE_TIMEOUT_MS,
+                     lambda answered: self._on_probe_reply(bus_name, answered))
+
+    def _on_probe_reply(self, bus_name, answered):
+        if bus_name not in self._unresponsive_apps:
+            return
+        if not answered:
+            def retry():
+                if bus_name in self._unresponsive_apps:
+                    self._probe_app(bus_name)
+                return GLib.SOURCE_REMOVE
+            GLib.timeout_add(PROBE_RETRY_MS, retry)
+            return
+        silent_s = time.monotonic() - self._unresponsive_apps.pop(bus_name)
+        self._log(f"[frames] {bus_name} answers again after {silent_s:.1f} s")
+        # Its frame list and content may have changed meanwhile.
+        self.frames = None
+        self._dirty_bus_names.add(bus_name)
+        self._schedule_update()
 
     def _match(self, scene):
         candidates = [w for w in scene.windows if w.layer < LAYER_OVERLAY]
@@ -329,7 +382,7 @@ class Backend:
         target = popup.client
         for main in mains:
             frame = self.frames_all[matches[main.id].frame_index]
-            if frame.embedded:
+            if frame.embedded or _bus_name(frame.id) in self._unresponsive_apps:
                 continue
             place = placement_for(scene, main, frame.toolkit, frame.toolkit_version)
             for child in AXObject.iter_children(frame.accessible):
@@ -379,11 +432,18 @@ class Backend:
                 continue
             frame = self.frames_all[match.frame_index]
             cached = self._raw.get(window_id)
-            bus_name = frame.id.split("/", 1)[0]
+            bus_name = _bus_name(frame.id)
+            silent = bus_name in self._unresponsive_apps
             size = (round(window.buffer.w), round(window.buffer.h))
             reason = ("new" if cached is None else "frame" if cached[0] != frame.id
                       else "event" if bus_name in reread_bus_names
                       else "poll/size" if window_id in reread_windows else None)
+            if reason and silent:
+                # Not read while it hangs (_probe_app); what it showed
+                # last stays, KWin still moves, hides and covers it.
+                if cached is None or cached[0] != frame.id:
+                    continue
+                reason = None
             if reason:
                 if "popupWindow" in window.flags and (cached is None or cached[0] != frame.id):
                     self._log(f"[popup] kwin {window.frame} ← {frame.role} {frame.name!r} "
@@ -399,16 +459,23 @@ class Backend:
                     # frame_info and DECKERY_READER=sync do.)
                     frame.accessible.clear_cache()
                 raw, stats = read_window(frame.accessible, frame.toolkit, rebase=frame.embedded)
-                self._raw[window_id] = (frame.id, size, raw)
-                self._probes[window_id] = stats.probes
-                if stats.nodes <= 1:
-                    self._log(f"[empty] {window.resource_class} ← {frame.id} {frame.role} {frame.name!r} "
-                              f"{frame.width}x{frame.height} ({match.rule})")
-                    self._reread_empty_later(window_id)
+                if stats.timed_out:
+                    # Hung: keep what it showed last, as for a known silent app.
+                    self._mark_unresponsive(bus_name)
+                    reads.append(f"{window.resource_class}:timeout/{stats.ms:.0f}ms({reason})")
+                    if cached is None or cached[0] != frame.id:
+                        continue
                 else:
-                    self._empty_rereads.pop(window_id, None)
-                reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms{stats.note}({reason})")
-            elif cached[1] != size:
+                    self._raw[window_id] = (frame.id, size, raw)
+                    self._probes[window_id] = stats.probes
+                    if stats.nodes <= 1:
+                        self._log(f"[empty] {window.resource_class} ← {frame.id} {frame.role} {frame.name!r} "
+                                  f"{frame.width}x{frame.height} ({match.rule})")
+                        self._reread_empty_later(window_id)
+                    else:
+                        self._empty_rereads.pop(window_id, None)
+                    reads.append(f"{window.resource_class}:{len(raw)}el/{stats.nodes}n/{stats.ms:.0f}ms{stats.note}({reason})")
+            elif cached[1] != size and not silent:
                 self._dirty_windows.add(window_id)
                 self._schedule_update()
             raw = self._raw[window_id][2]
